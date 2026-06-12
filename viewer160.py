@@ -1,5 +1,5 @@
 """
-viewer.py  —  Route Sheet Viewer
+viewer.py  ?  Route Sheet Viewer
 """
 
 import re, sys, csv, copy, random, math, time, uuid, logging
@@ -19,13 +19,13 @@ from PyQt5.QtGui import QFont, QColor, QDrag, QPainter, QPen
 
 import openpyxl
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ?? Logging ???????????????????????????????????????????????????????????????????
 # Module logger. A NullHandler keeps libraries quiet by default; main() attaches
 # a real handler so parsing/data-load problems surface instead of vanishing.
 logger = logging.getLogger("viewer")
 logger.addHandler(logging.NullHandler())
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ?? Constants ?????????????????????????????????????????????????????????????????
 
 IRMA_RE     = re.compile(r"^\d{2}-\d{3}$")
 SHEET_RE    = re.compile(r"^\d{4}$")  # kept for display logic
@@ -41,8 +41,8 @@ PRELOAD_VOL = 40000
 
 C_IRMA=1; C_TRAIN=4; C_M1_START=5; C_M1_FINISH=8; C_M2_START=11
 C_M2_FINISH=14; C_EDPU=17; C_ROUTE=21; C_LOCATION=32; C_PRIOR_VOL=51
-C_DRIVER_START = 52   # AZ1 — driver start time (datetime.time)
-C_DAY_COLOUR   = 62   # BJ1 — day colour string (RED/BLUE/GRASSFED/A2 etc.)
+C_DRIVER_START = 52   # AZ1 ? driver start time (datetime.time)
+C_DAY_COLOUR   = 62   # BJ1 ? day colour string (RED/BLUE/GRASSFED/A2 etc.)
 
 DRIVE_SPEED_KMH = 50.0   # km/h average
 ONSITE_MIN      = 25.0   # fixed on-site setup minutes per stop
@@ -93,34 +93,34 @@ TWO_HR_WIN_COL = next(i for i, (_, k) in enumerate(COLS) if k == "_two_hr_win")
 SOLVER_SKIP_SHEETS = {"1603", "1604"}
 
 # Default plant receiving windows (open HH:MM, close HH:MM).
-# None means 24/7 — no restriction.  Overnight windows (close < open) are
+# None means 24/7 ? no restriction.  Overnight windows (close < open) are
 # handled by time_in_window().  These are hard-coded from the
 # "Plant_Receiving_Windows" reference sheet; the user can override them in
 # the Solver tab at run time.
 PLANT_RECEIVING_WINDOWS = {
-    "909312": ("00:00", "23:59"),  # Agropur Burnaby        — 24/7
-    "972711": ("05:00", "23:00"),  # Saputo Port Coquitlam  — 5am–11pm
-    "902011": ("06:00", "18:00"),  # Avalon Dairy           — 6am–6pm
-    "907011": ("10:00", "16:00"),  # Birchwood Dairy        — 10am–4pm
-    "906011": ("06:00", "18:00"),  # Dhaliwal Dairy         — 6am–6pm
-    "965713": ("06:00", "18:00"),  # First Choice           — 6am–6pm
-    "911011": ("18:00", "20:00"),  # Golden Ears PM         — 6pm–8pm
-    "918011": ("06:00", "18:00"),  # Khalsa FY              — 6am–6pm
-    "901012": ("06:00", "18:00"),  # Olympic Dairy          — 6am–6pm
-    "905011": ("06:00", "18:00"),  # Pinnacle Dairy         — 6am–6pm
-    "916011": ("06:00", "18:00"),  # Prabu Foods            — 6am–6pm
-    "951305": ("06:00", "18:00"),  # Reva Foods             — 6am–6pm
-    "917011": ("08:00", "11:00"),  # Ridgecrest             — 8am–11am
-    "981301": ("08:00", "11:00"),  # WOW Foods              — 8am–11am
-    "912011": ("05:00", "17:00"),  # Meadowfresh (regular)  — 5am–5pm
-    "908011": ("05:00", "00:30"),  # Punjab                 — 5am–12:30am (overnight)
-    "915011": ("00:00", "23:59"),  # Vitalus Abbotsford     — 24/7
-    "972712": ("06:00", "23:59"),  # Saputo Abbotsford      — 6am–midnight
-    "902013": ("06:00", "18:00"),  # GRASSFED Avalon        — 6am–6pm
-    "907012": ("06:00", "18:00"),  # GRASSFED Birchwood     — 6am–6pm
-    "929011": ("06:00", "18:00"),  # Earth's Own / A2       — 6am–6pm
-    "912015": ("05:00", "17:00"),  # GRASSFED Meadowfresh   — 5am–5pm
-    "913011": ("06:00", "08:00"),  # Farmhouse Agassiz      — 6am–8am
+    "909312": ("00:00", "23:59"),  # Agropur Burnaby        ? 24/7
+    "972711": ("05:00", "23:00"),  # Saputo Port Coquitlam  ? 5am?11pm
+    "902011": ("06:00", "18:00"),  # Avalon Dairy           ? 6am?6pm
+    "907011": ("10:00", "16:00"),  # Birchwood Dairy        ? 10am?4pm
+    "906011": ("06:00", "18:00"),  # Dhaliwal Dairy         ? 6am?6pm
+    "965713": ("06:00", "18:00"),  # First Choice           ? 6am?6pm
+    "911011": ("18:00", "20:00"),  # Golden Ears PM         ? 6pm?8pm
+    "918011": ("06:00", "18:00"),  # Khalsa FY              ? 6am?6pm
+    "901012": ("06:00", "18:00"),  # Olympic Dairy          ? 6am?6pm
+    "905011": ("06:00", "18:00"),  # Pinnacle Dairy         ? 6am?6pm
+    "916011": ("06:00", "18:00"),  # Prabu Foods            ? 6am?6pm
+    "951305": ("06:00", "18:00"),  # Reva Foods             ? 6am?6pm
+    "917011": ("08:00", "11:00"),  # Ridgecrest             ? 8am?11am
+    "981301": ("08:00", "11:00"),  # WOW Foods              ? 8am?11am
+    "912011": ("05:00", "17:00"),  # Meadowfresh (regular)  ? 5am?5pm
+    "908011": ("05:00", "00:30"),  # Punjab                 ? 5am?12:30am (overnight)
+    "915011": ("00:00", "23:59"),  # Vitalus Abbotsford     ? 24/7
+    "972712": ("06:00", "23:59"),  # Saputo Abbotsford      ? 6am?midnight
+    "902013": ("06:00", "18:00"),  # GRASSFED Avalon        ? 6am?6pm
+    "907012": ("06:00", "18:00"),  # GRASSFED Birchwood     ? 6am?6pm
+    "929011": ("06:00", "18:00"),  # Earth's Own / A2       ? 6am?6pm
+    "912015": ("05:00", "17:00"),  # GRASSFED Meadowfresh   ? 5am?5pm
+    "913011": ("06:00", "08:00"),  # Farmhouse Agassiz      ? 6am?8am
 }
 
 # Tray uses the same columns plus a "From Route" column
@@ -142,7 +142,7 @@ CLR_RED       = QColor("#c0392b")
 CLR_RED_BG    = QColor("#fdecea")
 CLR_CHANGED   = QColor("#fff9c4")   # highlight for changed farms in comparison
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ?? Helpers ???????????????????????????????????????????????????????????????????
 
 def get_exe_dir():
     """Directory of the executable (or script). Used for the browse-default root."""
@@ -176,11 +176,11 @@ def month_key(name):
         if m in n: return i
     return 99
 
-# ── Milking window conflict ──────────────────────────────────────────────────
+# ?? Milking window conflict ??????????????????????????????????????????????????
 
 def parse_hhmm(s):
     """Parse 'HH:MM' string to datetime.time, or return None."""
-    if not s or s == "—": return None
+    if not s or s == "?": return None
     try:
         h, m = s.split(":")
         return dt_time(int(h), int(m))
@@ -219,7 +219,7 @@ def arrives_during_milking(arr_time, row_data, suppress_no_milking=True):
     return False
 
 
-# ── Distance matrix ───────────────────────────────────────────────────────────
+# ?? Distance matrix ???????????????????????????????????????????????????????????
 
 def normalise_key(k):
     s = str(k).strip()
@@ -229,7 +229,7 @@ def normalise_key(k):
 def load_distance_matrix(path):
     dm = {}
     if not path.exists():
-        logger.warning("Distance matrix not found at %s — distances unavailable", path)
+        logger.warning("Distance matrix not found at %s ? distances unavailable", path)
         return dm
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -336,7 +336,7 @@ def _build_block_stops(block, origin, is_last):
     for f_idx, farm in enumerate(farms):
         stops.append({"type": "farm", "key": farm.get("irma",""), "farm": farm})
         # Insert any dests that split after this farm.
-        # Skip f_idx+1 == len(farms) — those are handled by the "after all farms"
+        # Skip f_idx+1 == len(farms) ? those are handled by the "after all farms"
         # loop below to avoid double-insertion.
         if f_idx + 1 < len(farms):
             for d in dests_by_split.get(f_idx + 1, []):
@@ -357,9 +357,9 @@ def _build_block_stops(block, origin, is_last):
 
 
 def _is_holdover_block(block):
-    """Return True if every destination in this block is a 'Yard for …' location.
+    """Return True if every destination in this block is a 'Yard for ?' location.
 
-    These blocks end at a yard trailer — the farms are collected the same day
+    These blocks end at a yard trailer ? the farms are collected the same day
     but the milk sits overnight before being picked up.  The FARM ORDER is
     still optimisable; only the final yard destination must stay constant.
     Use _is_preload_block() to detect the next-morning pickup blocks that must
@@ -376,7 +376,7 @@ def _is_holdover_block(block):
 
 
 def _is_preload_block(block):
-    """Return True if this block is a preload offload — no farms, just a
+    """Return True if this block is a preload offload ? no farms, just a
     delivery to a processor at the start of the day (previous night's load).
 
     These blocks must be held completely constant: no farms added, destination
@@ -392,7 +392,7 @@ def _is_fixed_vol_block(block):
     When every destination in a block has an explicit vol_partial, the total
     deliverable volume is capped at their sum.  Any farm volume above that cap
     is silently dropped from accounting.  Rather than trying to optimise around
-    this, the solver holds these blocks completely frozen — the dispatcher has
+    this, the solver holds these blocks completely frozen ? the dispatcher has
     explicitly specified the volumes and the solver has no business changing the
     farm assignment.
     """
@@ -442,7 +442,7 @@ def calc_durations(blocks, dm_dur):
     return all_durs
 
 
-# ── Time estimation ──────────────────────────────────────────────────────────
+# ?? Time estimation ??????????????????????????????????????????????????????????
 
 def mins_to_time(start_time, offset_mins):
     """Add offset_mins (float) to a datetime.time. Returns datetime.time."""
@@ -450,7 +450,7 @@ def mins_to_time(start_time, offset_mins):
     return dt.time()
 
 def fmt_hhmm(t):
-    if t is None: return "—"
+    if t is None: return "?"
     return f"{t.hour:02d}:{t.minute:02d}"
 
 def day_colour_style(day_colour):
@@ -493,7 +493,7 @@ def _dest_vol_partial(dest_dict, total_farm_vol, already_delivered):
 
 
 def _block_dest_offloads(block):
-    """Litres offloaded per destination key for a single block → {key: litres}.
+    """Litres offloaded per destination key for a single block ? {key: litres}.
 
     Walks the block's destinations in order, assigning each its vol_partial
     (or the remaining farm volume when vol_partial is None), and aggregates by
@@ -715,9 +715,9 @@ def total_route_dist(blocks, dm):
             else: total += d
     return total, ok
 
-# ── Excel parsing ─────────────────────────────────────────────────────────────
+# ?? Excel parsing ?????????????????????????????????????????????????????????????
 
-# ── Delivery-info column constants (1-based) ─────────────────────────────────
+# ?? Delivery-info column constants (1-based) ?????????????????????????????????
 # Col 1 = row number label (1., 2., 3.)
 # Col 2 = partial volume (e.g. 6900) or "Full Load" or empty
 # Col 6 = processor name
@@ -745,7 +745,7 @@ def _parse_dest_row(ws, r, ws_formula=None):
     if not dn and not dk:
         return None
     # "WASH AT VTL" and similar wash instructions are operational notes,
-    # not processor destinations — exclude them.
+    # not processor destinations ? exclude them.
     if "wash" in dn.lower():
         return None
     vol_raw = ws.cell(r, C_DEST_VOL).value
@@ -764,12 +764,12 @@ def _parse_dest_row(ws, r, ws_formula=None):
 
 def parse_sheet(ws, ws_formula=None):
     """Parse one worksheet.  ws is the data_only workbook sheet;
-    ws_formula (optional) is the same sheet from a formula workbook — used
+    ws_formula (optional) is the same sheet from a formula workbook ? used
     to recover numeric values when the cached data value is None (e.g. the
     file was saved without recalculating formulas)."""
 
     # In read_only mode openpyxl yields EmptyCell objects for empty cells.
-    # EmptyCell has .value=None but no .row/.column attributes — normalise
+    # EmptyCell has .value=None but no .row/.column attributes ? normalise
     # them to None so the rest of the parser never sees them.
     def _cell_value(cell):
         try:
@@ -799,7 +799,7 @@ def parse_sheet(ws, ws_formula=None):
     irma_header_rows = []
     # dest_list_rows maps irma_header_row -> [dest_dict, ...]
     dest_list_rows = {}
-    # Delivery info found before any IRMA# row → preload dests
+    # Delivery info found before any IRMA# row ? preload dests
     preload_dests = []
 
     i = 0
@@ -811,7 +811,7 @@ def parse_sheet(ws, ws_formula=None):
         if isinstance(val0, str) and val0.strip().upper() == "IRMA#":
             irma_header_rows.append(r)
 
-        # Detect "Delivery Information:" block — grab numbered rows that follow
+        # Detect "Delivery Information:" block ? grab numbered rows that follow
         if isinstance(c2, str) and "delivery" in c2.lower():
             hdr_key = irma_header_rows[-1] if irma_header_rows else None
             if hdr_key is not None:
@@ -830,7 +830,7 @@ def parse_sheet(ws, ws_formula=None):
                 i = j
                 continue
             else:
-                # Delivery info before any IRMA# row — this is a preload offload block.
+                # Delivery info before any IRMA# row ? this is a preload offload block.
                 # Capture dests into preload_dests (only the first such section).
                 if not preload_dests:
                     j = i + 1
@@ -934,7 +934,7 @@ def parse_sheet(ws, ws_formula=None):
 
     return blocks, driver_start, day_colour
 
-# ── Table item factories ──────────────────────────────────────────────────────
+# ?? Table item factories ??????????????????????????????????????????????????????
 
 def make_header_item(text, bg=CLR_HEADER, fg=CLR_HEADER_FG, bold=True, draggable=False):
     item = QTableWidgetItem(str(text))
@@ -958,7 +958,7 @@ def make_data_item(text, bg=CLR_WHITE, align=Qt.AlignCenter, fg=None, draggable=
     if fg: item.setForeground(fg)
     return item
 
-# ── Route table renderer ──────────────────────────────────────────────────────
+# ?? Route table renderer ??????????????????????????????????????????????????????
 
 def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=None,
                    suppress_no_milking=True, plant_windows=None):
@@ -1030,10 +1030,10 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
             origin_sub = (prev_dests[-1]["name"] if prev_dests else
                           blocks[b_idx-1].get("dest_name","")) or origin_key
         od = dists[0]
-        od_str = f"{od:.1f}" if od is not None else "—"
+        od_str = f"{od:.1f}" if od is not None else "?"
         # Time entries for this block: [origin, farm0, farm1, ..., dest]
         btimes = all_times[b_idx] if all_times else None
-        origin_dep_str = fmt_hhmm(btimes[0]["dep"]) if btimes else "—"
+        origin_dep_str = fmt_hhmm(btimes[0]["dep"]) if btimes else "?"
         for c_idx, (_, key) in enumerate(COLS):
             if key == "irma":       item = make_data_item(origin_key, bg=CLR_DEPOT)
             elif key == "location": item = make_data_item(origin_sub, bg=CLR_DEPOT)
@@ -1045,7 +1045,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
             table.setItem(r, c_idx, item)
         r += 1
 
-        # ── Stop rows in actual visit order ──────────────────────────────
+        # ?? Stop rows in actual visit order ??????????????????????????????
         # Walk _build_block_stops to interleave farms and mid-route dest dropoffs
         # in the order the truck actually visits them.
         is_last_block = (b_idx == len(blocks) - 1)
@@ -1057,7 +1057,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         total_farm_vol = (PRELOAD_VOL_DISPLAY if block.get("preload") and not farms
                           else route_vol)
         already_del    = 0.0
-        last_dest_dep_s = "—"   # for subtotal end-time
+        last_dest_dep_s = "?"   # for subtotal end-time
         farm_alt_idx   = 0       # for alternating row colors
 
         # Map dest dict id -> position in block.dests list (for d_i lookups)
@@ -1070,7 +1070,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         for stop in block_stops:
             si = stop["_si"]
             stype = stop["type"]
-            # Skip origin and vedder — handled separately above and below
+            # Skip origin and vedder ? handled separately above and below
             if stype in ("origin", "vedder"):
                 continue
 
@@ -1081,7 +1081,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
             dep_s = fmt_hhmm(dep_t)
             # Distance leg from THIS stop to the next stop
             leg = dists[si] if si < len(dists) else None
-            ds  = f"{leg:.1f}" if leg is not None else "—"
+            ds  = f"{leg:.1f}" if leg is not None else "?"
 
             if stype == "farm":
                 row_data = stop["farm"]
@@ -1161,7 +1161,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
 
                 # Use a distinct background for partial mid-route dropoffs so they're visually obvious
                 if is_partial_split:
-                    dest_bg = QColor("#fff8e1")   # soft amber — "partial dropoff"
+                    dest_bg = QColor("#fff8e1")   # soft amber ? "partial dropoff"
                 elif dest_win_conflict:
                     dest_bg = CLR_DEST_WARN
                 else:
@@ -1170,7 +1170,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
                 # Compose location string with PARTIAL tag where appropriate
                 loc_str = dest_d.get("name","") or dest_d.get("key","")
                 if is_partial_split:
-                    loc_str = f"⤓ PARTIAL — {loc_str}"
+                    loc_str = f"? PARTIAL ? {loc_str}"
 
                 for c_idx, (_, key) in enumerate(COLS):
                     if key == "irma":
@@ -1202,7 +1202,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
             CLR_WARN = QColor("#fff3cd")
             for c_idx, (_, key) in enumerate(COLS):
                 if c_idx == 0:
-                    item = make_header_item("⚠ No processor assigned",
+                    item = make_header_item("? No processor assigned",
                                             bg=CLR_WARN, fg=QColor("#856404"))
                 else:
                     item = make_data_item("", bg=CLR_WARN)
@@ -1210,16 +1210,16 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
                 table.setItem(r, c_idx, item)
             r += 1
 
-        # VEDDER return row — only on the last block
+        # VEDDER return row ? only on the last block
         if is_last_block:
             vedder_stops = [s for s in block_stops if s["type"] == "vedder"]
             vedder_idx   = vedder_stops[0]["_si"] if vedder_stops else (len(farms) + len(dests) + 1)
             vedder_ret_t = btimes[vedder_idx] if btimes and vedder_idx < len(btimes) else None
-            vedder_arr_s = fmt_hhmm(vedder_ret_t["arr"]) if vedder_ret_t else "—"
+            vedder_arr_s = fmt_hhmm(vedder_ret_t["arr"]) if vedder_ret_t else "?"
             for c_idx, (_, key) in enumerate(COLS):
                 if key == "irma":       item = make_data_item("VEDDER", bg=CLR_DEPOT)
                 elif key == "location": item = make_data_item("Depot", bg=CLR_DEPOT)
-                elif key == "dist":     item = make_data_item("—", bg=CLR_DEPOT,
+                elif key == "dist":     item = make_data_item("?", bg=CLR_DEPOT,
                                                               align=Qt.AlignRight|Qt.AlignVCenter)
                 elif key == "arr_time": item = make_data_item(vedder_arr_s, bg=CLR_DEPOT,
                                                               align=Qt.AlignCenter)
@@ -1252,10 +1252,10 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         day_dist += route_dist; day_vol += route_vol
         if not route_ok: day_ok = False
 
-    # Day total — no red colouring here
+    # Day total ? no red colouring here
     ds3 = f"{day_dist:.1f} km" if day_ok else f"~{day_dist:.1f} km*"
     # Shift end = arrival back at VEDDER (last entry in last block's times)
-    shift_end = fmt_hhmm(_end_cursor.time()) if _end_cursor is not None else "—"
+    shift_end = fmt_hhmm(_end_cursor.time()) if _end_cursor is not None else "?"
     for c_idx, (_, key) in enumerate(COLS):
         if c_idx == 0:
             item = make_header_item("Total", bg=CLR_TOTAL, fg=QColor("#000000"))
@@ -1272,7 +1272,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
     r += 1
 
     # Shift length row
-    shift_len_str = "—"
+    shift_len_str = "?"
     if start_time and _end_cursor is not None:
         from datetime import datetime, date
         base  = datetime.combine(date.today(), start_time)
@@ -1282,7 +1282,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         shift_len_str = f"{hours}h {mins:02d}m"
     CLR_SHIFT = QColor("#e8eaf6")
     table.setSpan(r, 0, 1, len(COLS))
-    lbl = f"  Estimated Shift Length:  {fmt_hhmm(start_time)} → {shift_end}  =  {shift_len_str}"
+    lbl = f"  Estimated Shift Length:  {fmt_hhmm(start_time)} ? {shift_end}  =  {shift_len_str}"
     item = make_header_item(lbl, bg=CLR_SHIFT, fg=QColor("#1a237e"))
     table.setItem(r, 0, item)
 
@@ -1299,7 +1299,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
             hh.setSectionResizeMode(c_idx, QHeaderView.Fixed)
             table.setColumnWidth(c_idx, 44)
 
-# ── File loader thread ────────────────────────────────────────────────────────
+# ?? File loader thread ????????????????????????????????????????????????????????
 
 def _try_eval_formula(formula_str):
     """
@@ -1326,7 +1326,7 @@ def _try_eval_formula(formula_str):
     if not _re.match(r'^[\d\s\+\-\*\/\.\(\)]+$', s):
         return None
     try:
-        result = eval(s, {"__builtins__": {}}, {})  # no builtins — safe for pure arithmetic
+        result = eval(s, {"__builtins__": {}}, {})  # no builtins ? safe for pure arithmetic
         return float(result)
     except Exception:
         return None
@@ -1355,7 +1355,7 @@ class FileLoader(QThread):
                     blocks, start_time, day_colour = parse_sheet(
                         wb_data[n], ws_formula=wb_form[n])
 
-                    # ── Post-parse diagnostics ────────────────────────────────
+                    # ?? Post-parse diagnostics ????????????????????????????????
                     # Each check emits a specific warning so the user knows
                     # *why* a sheet looks empty or wrong, rather than just
                     # seeing a blank tab.
@@ -1363,7 +1363,7 @@ class FileLoader(QThread):
 
                     if not blocks:
                         warnings.append(
-                            "No blocks found — no 'IRMA#' header rows were "
+                            "No blocks found ? no 'IRMA#' header rows were "
                             "detected.  Check that the sheet follows the "
                             "expected layout (IRMA# in column A).")
 
@@ -1381,7 +1381,7 @@ class FileLoader(QThread):
                             f" (column {C_DAY_COLOUR}).  Expected RED, BLUE, "
                             f"or GRASSFED.  The solver may skip this sheet.")
 
-                    # Check for formula cells whose cached value is None —
+                    # Check for formula cells whose cached value is None ?
                     # the most common cause of 'looks fine in Excel, missing
                     # data in the viewer'.  Report the first few occurrences.
                     formula_nones = []
@@ -1395,7 +1395,7 @@ class FileLoader(QThread):
                                  if len(formula_nones) > 5 else ""
                         warnings.append(
                             f"prior_vol is None for farm(s): {sample}{extra}.  "
-                            f"These cells may contain uncalculated formulas — "
+                            f"These cells may contain uncalculated formulas ? "
                             f"open the file in Excel, press Ctrl+Alt+F9 to "
                             f"force-recalculate, then save and reload.")
 
@@ -1422,7 +1422,7 @@ class FileLoader(QThread):
                         # dropped from the cache without this).
                         if not warnings:
                             msg = ("Sheet produced no usable data and no "
-                                   "specific warnings — the layout may not "
+                                   "specific warnings ? the layout may not "
                                    "match the expected format.")
                             logger.warning("[%s / %s] %s", self.fname, n, msg)
                             self.sheet_warning.emit(self.fname, n, msg)
@@ -1436,7 +1436,7 @@ class FileLoader(QThread):
                     msg = (f"Failed to parse sheet '{n}': {sheet_err}\n{detail}")
                     logger.error("[%s / %s] %s", self.fname, n, msg)
                     self.sheet_warning.emit(self.fname, n,
-                        f"Parse error — {sheet_err}  "
+                        f"Parse error ? {sheet_err}  "
                         f"(see console / log for full traceback)")
 
             wb_data.close(); wb_form.close()
@@ -1444,7 +1444,7 @@ class FileLoader(QThread):
         except Exception as e:
             self.failed.emit(self.fname, str(e))
 
-# ── Drag-aware route table ────────────────────────────────────────────────────
+# ?? Drag-aware route table ????????????????????????????????????????????????????
 
 MIME_FARM      = "application/x-farm"
 MIME_TRAY_FARM = "application/x-tray-farm"
@@ -1455,10 +1455,10 @@ MIME_BLOCK     = "application/x-block"     # drag entire block by its banner row
 class EditableRouteTable(QTableWidget):
     """Editable route table: drag farms OUT (to tray) or accept drags IN (from tray).
     Also supports internal row reordering via drag."""
-    farm_removed  = pyqtSignal(int, int)        # b_idx, f_idx  — removed to tray
+    farm_removed  = pyqtSignal(int, int)        # b_idx, f_idx  ? removed to tray
     farm_inserted = pyqtSignal(int, int, int)   # tray_idx, b_idx, insert_before_f_idx
     farm_reorder  = pyqtSignal(int, int, int, int)  # src_b, src_f, dst_b, dst_f
-    dest_removed  = pyqtSignal(int, int)        # b_idx, d_idx  — dest removed to tray
+    dest_removed  = pyqtSignal(int, int)        # b_idx, d_idx  ? dest removed to tray
     dest_reorder  = pyqtSignal(int, int, int, int)  # src_b, src_d, dst_b, dst_d
     dest_inserted = pyqtSignal(int, int, int)   # tray_idx, b_idx, insert_before_d_idx
     block_reorder = pyqtSignal(int, int)        # src_b_idx, insert_before_b_idx
@@ -1540,7 +1540,7 @@ class EditableRouteTable(QTableWidget):
         item = self.currentItem()
         if item is None: return
 
-        # Block banner drag — UserRole+2 holds b_idx
+        # Block banner drag ? UserRole+2 holds b_idx
         block_idx = item.data(Qt.UserRole + 2)
         if block_idx is not None:
             mime = QMimeData()
@@ -1550,7 +1550,7 @@ class EditableRouteTable(QTableWidget):
             drag.exec_(Qt.MoveAction)
             return
 
-        # Dest drag — UserRole+1 holds ("dest", b_idx, d_idx)
+        # Dest drag ? UserRole+1 holds ("dest", b_idx, d_idx)
         dest_data = item.data(Qt.UserRole + 1)
         if dest_data is not None and dest_data[0] == "dest":
             _, b_idx, d_idx = dest_data
@@ -1561,7 +1561,7 @@ class EditableRouteTable(QTableWidget):
             drag.exec_(Qt.MoveAction)
             return
 
-        # Farm drag — UserRole holds (b_idx, f_idx)
+        # Farm drag ? UserRole holds (b_idx, f_idx)
         farm_data = item.data(Qt.UserRole)
         if farm_data is None: return
         b_idx, f_idx = farm_data
@@ -1636,7 +1636,7 @@ class EditableRouteTable(QTableWidget):
         if row_at_drop < 0:
             if self.rowCount() == 0:
                 return (0, 0)
-            # Dropped below all rows — find the last block
+            # Dropped below all rows ? find the last block
             for r in range(self.rowCount() - 1, -1, -1):
                 it = self.item(r, 0)
                 if it is not None:
@@ -1657,7 +1657,7 @@ class EditableRouteTable(QTableWidget):
         if data is not None:
             return (data[0], data[1])
 
-        # Dropped onto a dest (processor) row — insert AFTER the last farm
+        # Dropped onto a dest (processor) row ? insert AFTER the last farm
         # in that block, i.e. immediately before the processor.
         dest_tag = item.data(Qt.UserRole + 1)
         if dest_tag is not None and isinstance(dest_tag, tuple) and dest_tag[0] == "dest":
@@ -1683,7 +1683,7 @@ class EditableRouteTable(QTableWidget):
             fd = it.data(Qt.UserRole)
             if fd is not None:
                 return (fd[0], fd[1])
-            # Hit the next block's banner — stop; drop is at start of that block
+            # Hit the next block's banner ? stop; drop is at start of that block
             bd = it.data(Qt.UserRole + 2)
             if bd is not None and r > row_at_drop:
                 # Insert at position 0 of whichever block we're currently in.
@@ -1696,7 +1696,7 @@ class EditableRouteTable(QTableWidget):
                             return (bdb, 0)
                 return (bd, 0)
 
-        # Nothing found forward — scan backward for containing block banner
+        # Nothing found forward ? scan backward for containing block banner
         for r in range(row_at_drop, -1, -1):
             it = self.item(r, 0)
             if it is None:
@@ -1727,7 +1727,7 @@ class EditableRouteTable(QTableWidget):
                 dd2 = it.data(Qt.UserRole + 1)
                 if dd2 and dd2[0] == "dest":
                     return (dd2[1], dd2[2])
-                # Hit next block banner — drop is in current block
+                # Hit next block banner ? drop is in current block
                 bd = it.data(Qt.UserRole + 2)
                 if bd is not None and ri > row_at_drop:
                     break
@@ -1738,7 +1738,7 @@ class EditableRouteTable(QTableWidget):
                 dd2 = it.data(Qt.UserRole + 1)
                 if dd2 and dd2[0] == "dest":
                     return (dd2[1], dd2[2] + 1)
-                # Found the banner for this block — append as first dest
+                # Found the banner for this block ? append as first dest
                 bd = it.data(Qt.UserRole + 2)
                 if bd is not None:
                     return (bd, 0)
@@ -1756,15 +1756,15 @@ class EditableRouteTable(QTableWidget):
                 bd = it.data(Qt.UserRole + 2)
                 if bd is not None:
                     return bd
-        # Nothing found forward — append after last block
+        # Nothing found forward ? append after last block
         return -1
 
-# ── Farm tray (removed farms, table-based, drag back) ────────────────────────
+# ?? Farm tray (removed farms, table-based, drag back) ????????????????????????
 
 class FarmTray(QTableWidget):
     """Holds removed farms. Farms can be dragged back to the editable route table."""
-    farm_incoming = pyqtSignal(int, int)   # b_idx, f_idx — farm dropped onto tray from route
-    dest_incoming = pyqtSignal(int, int)   # b_idx, d_idx — dest dropped onto tray from route
+    farm_incoming = pyqtSignal(int, int)   # b_idx, f_idx ? farm dropped onto tray from route
+    dest_incoming = pyqtSignal(int, int)   # b_idx, d_idx ? dest dropped onto tray from route
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1833,7 +1833,7 @@ class FarmTray(QTableWidget):
 
     def add_farm(self, farm_dict, route_label, farm_colour="", current_colour=""):
         """Add a farm row. farm_colour is the day type it was removed from.
-        current_colour is the active sheet's day type — if different, row is bold."""
+        current_colour is the active sheet's day type ? if different, row is bold."""
         r = self.rowCount(); self.insertRow(r)
         mismatch = bool(farm_colour and current_colour and
                         farm_colour.upper().strip() != current_colour.upper().strip())
@@ -1848,7 +1848,7 @@ class FarmTray(QTableWidget):
                 fg  = None
             elif key == "_day_colour":
                 bg2, fg2, label = day_colour_style(farm_colour)
-                val = label or farm_colour or "—"
+                val = label or farm_colour or "?"
                 bg  = bg2 if bg2 else CLR_REMOVED
                 fg  = fg2
             elif key == "prior_vol":
@@ -1860,7 +1860,7 @@ class FarmTray(QTableWidget):
             elif key == "proc_id":
                 val = ""; bg = CLR_REMOVED; fg = None
             elif key == "_two_hr_win":
-                val = "✓" if farm_dict.get("_two_hr_win") else ""
+                val = "?" if farm_dict.get("_two_hr_win") else ""
                 bg = CLR_REMOVED; fg = None
             else:
                 val = farm_dict.get(key, "")
@@ -1890,7 +1890,7 @@ class FarmTray(QTableWidget):
                 val = route_label; bg = CLR_DEST_TRAY; fg = None
             elif key == "_day_colour":
                 bg2, fg2, label = day_colour_style(farm_colour)
-                val = label or farm_colour or "—"
+                val = label or farm_colour or "?"
                 bg = bg2 if bg2 else CLR_DEST_TRAY; fg = fg2
             elif key == "irma":
                 val = ""; bg = CLR_DEST_TRAY; fg = None
@@ -1932,14 +1932,14 @@ class FarmTray(QTableWidget):
                 it = self.item(r, c)
                 if it: it.setFont(font)
 
-# ── Synchronised scroll helper ────────────────────────────────────────────────
+# ?? Synchronised scroll helper ????????????????????????????????????????????????
 
 def sync_scroll(src_bar, dst_bar, value):
     dst_bar.setValue(value)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ??????????????????????????????????????????????????????????????????????????????
 # ALNS Solver
-# ══════════════════════════════════════════════════════════════════════════════
+# ??????????????????????????????????????????????????????????????????????????????
 
 def _sheet_colour_bucket(day_colour):
     dc = day_colour.upper().strip()
@@ -1949,8 +1949,8 @@ def _sheet_colour_bucket(day_colour):
 
 
 def _route_km_simple(block, dm, origin="VEDDER"):
-    """Quick distance estimate: origin → farms → all dests (no VEDDER return).
-    Pure km only — used for 2-opt / or-opt intra-block resequencing where
+    """Quick distance estimate: origin ? farms ? all dests (no VEDDER return).
+    Pure km only ? used for 2-opt / or-opt intra-block resequencing where
     milking windows don't change between candidate orderings of the same farms."""
     farms     = [r["irma"] for r in block["rows"]]
     dest_keys = _block_dest_keys(block)
@@ -1976,7 +1976,7 @@ def _route_cost_with_milking(block, dm, origin="VEDDER",
       midnight on 'today'.  Each leg advances the cursor by drive time.
       If arrival falls inside a milking window (w1, w2, or w3), the wait
       until window-end is added as a penalty of wait_mins * milking_weight
-      (in km-equivalent units, since 1 km-eq ≈ 1.2 min at 50 km/h — close
+      (in km-equivalent units, since 1 km-eq ? 1.2 min at 50 km/h ? close
       enough for ranking purposes).  The cursor advances by the wait so
       downstream farms see a realistic arrival time, correctly handling
       midnight-crossing routes without modular wrap errors.
@@ -1997,7 +1997,7 @@ def _route_cost_with_milking(block, dm, origin="VEDDER",
 
     total_km = 0.0
     wait_pen = 0.0
-    # Absolute datetime cursor — no modular wrap, handles overnight routes correctly
+    # Absolute datetime cursor ? no modular wrap, handles overnight routes correctly
     cursor   = _dt.combine(_d.today(), _dt.min.time()) + _td(minutes=shift_start_mins)
 
     for i in range(len(stops) - 1):
@@ -2067,14 +2067,14 @@ def _sheet_cost(blocks, dm, start_time, cfg):
     Scalar cost for one truck's day (one sheet's worth of blocks).
 
     cfg keys used:
-      orig_dest_vols  – {dest_key: original_litres}  (group-wide)
-      vol_tol         – fractional tolerance  (0.15 → ±15 %)
-      vol_penalty     – penalty per litre outside tolerance
-      milking_weight  – multiplier on milking-wait km-equivalent
-      max_shift_h     – maximum shift hours before penalty
-      shift_penalty   – penalty per hour over max_shift_h
+      orig_dest_vols  ? {dest_key: original_litres}  (group-wide)
+      vol_tol         ? fractional tolerance  (0.15 ? �15 %)
+      vol_penalty     ? penalty per litre outside tolerance
+      milking_weight  ? multiplier on milking-wait km-equivalent
+      max_shift_h     ? maximum shift hours before penalty
+      shift_penalty   ? penalty per hour over max_shift_h
     """
-    # ── distance ──────────────────────────────────────────────────────────────
+    # ?? distance ??????????????????????????????????????????????????????????????
     total_km  = 0.0
     all_dists = calc_distances(blocks, dm)
     for dists in all_dists:
@@ -2082,7 +2082,7 @@ def _sheet_cost(blocks, dm, start_time, cfg):
             if d is not None:
                 total_km += d
 
-    # ── shift time & milking-window waits ─────────────────────────────────────
+    # ?? shift time & milking-window waits ?????????????????????????????????????
     shift_hours   = 0.0
     milking_mins  = 0.0
 
@@ -2120,8 +2120,8 @@ def _sheet_cost(blocks, dm, start_time, cfg):
                             orig_arr_dt += timedelta(days=1)
                         win_end_dt = orig_arr_dt + timedelta(hours=2)
                         if arr_dt <= win_end_dt:
-                            continue   # within (or before) window — no penalty
-                        # else: window missed — fall through to normal milking check
+                            continue   # within (or before) window ? no penalty
+                        # else: window missed ? fall through to normal milking check
                     elif farm.get("_two_hr_win"):
                         continue
 
@@ -2150,7 +2150,7 @@ def _sheet_cost(blocks, dm, start_time, cfg):
                                     end_w3 += timedelta(days=1)
                                 milking_mins += (end_w3 - arr_dt).total_seconds() / 60.0
 
-    # ── plant volume penalty (group-wide vols supplied via cfg) ───────────────
+    # ?? plant volume penalty (group-wide vols supplied via cfg) ???????????????
     # NOTE: vol penalty is computed at group level in _group_cost to avoid
     # double-counting; here we just return the non-volume portion so that
     # _best_insert_pos can use a fast per-sheet cost without needing group state.
@@ -2173,10 +2173,10 @@ def _sheet_cost(blocks, dm, start_time, cfg):
             elif cur_vol > hi:
                 vol_pen += (cur_vol - hi) * vol_penalty_rate
 
-    # ── 2h-window missed penalty ──────────────────────────────────────────────
+    # ?? 2h-window missed penalty ??????????????????????????????????????????????
     # Penalise arriving after orig_arr + 2h (window missed entirely).
     # Arriving early (before orig_arr) is handled as a wait in calc_times, not
-    # penalised here — the truck just waits at the farm until the window opens.
+    # penalised here ? the truck just waits at the farm until the window opens.
     win_miss_pen  = cfg.get("win_miss_penalty", 200.0)   # km-equivalent per hour late
     win_miss_cost = 0.0
     if start_time and all_times:
@@ -2199,7 +2199,7 @@ def _sheet_cost(blocks, dm, start_time, cfg):
                 if late_h > 0:
                     win_miss_cost += late_h * win_miss_pen
 
-    # ── truck capacity penalty ────────────────────────────────────────────────
+    # ?? truck capacity penalty ????????????????????????????????????????????????
     # For multi-dest routes with split_after, the truck offloads mid-route so
     # the total farm volume overstates the actual peak load.  We walk the stop
     # sequence and track the running load: +farm vol at farm stops, -offload vol
@@ -2209,7 +2209,7 @@ def _sheet_cost(blocks, dm, start_time, cfg):
     cap_pen       = 0.0
     for b_idx, block in enumerate(blocks):
         if _is_preload_block(block):
-            continue   # preload blocks start empty — no cap issue
+            continue   # preload blocks start empty ? no cap issue
         dests = block.get("dests") or []
         if not dests:
             dk = block.get("dest_key","")
@@ -2239,18 +2239,18 @@ def _sheet_cost(blocks, dm, start_time, cfg):
             if peak > hard_cap:
                 cap_pen += (peak - hard_cap) * cap_pen_rate
         else:
-            # No mid-route dropoff — total farm vol is the peak load
+            # No mid-route dropoff ? total farm vol is the peak load
             if total_farm_vol > hard_cap:
                 cap_pen += (total_farm_vol - hard_cap) * cap_pen_rate
 
-    # ── shift overage penalty ─────────────────────────────────────────────────
+    # ?? shift overage penalty ?????????????????????????????????????????????????
     max_shift      = cfg.get("max_shift_h", 14.0)
     shift_pen_rate = cfg.get("shift_penalty", 200.0)
     shift_pen      = max(0.0, shift_hours - max_shift) * shift_pen_rate
 
-    # ── total shift hours cost ────────────────────────────────────────────────
+    # ?? total shift hours cost ????????????????????????????????????????????????
     # A small per-hour cost on the full shift duration (not just the overage).
-    # This gives the solver a continuous gradient toward shorter days — without
+    # This gives the solver a continuous gradient toward shorter days ? without
     # it, any route that stays under max_shift_h looks equally good regardless
     # of whether it finishes in 10 hours or 13.5.
     # Default: 5.0 km-equivalent per hour (small enough not to override distance
@@ -2258,16 +2258,16 @@ def _sheet_cost(blocks, dm, start_time, cfg):
     shift_hours_rate = cfg.get("shift_hours_weight", 0.0)
     shift_hours_cost = shift_hours * shift_hours_rate if shift_hours > 0 else 0.0
 
-    # ── milking wait penalty ──────────────────────────────────────────────────
+    # ?? milking wait penalty ??????????????????????????????????????????????????
     # milking_mins * milking_weight: 1 min wait = 1 km-equivalent at weight=1.
     milking_equiv = milking_mins * cfg.get("milking_weight", 1.0)
 
-    # ── plant receiving-window penalty ────────────────────────────────────────
-    # Both components expressed in km-equivalent per hour — same scale as routing.
+    # ?? plant receiving-window penalty ????????????????????????????????????????
+    # Both components expressed in km-equivalent per hour ? same scale as routing.
     # 1. OUTSIDE penalty: arrival before open or after close.
     #    Rate: plant_win_penalty (default 200 km/h).
     # 2. MARGIN penalty: arrival inside the window but within the last
-    #    plant_win_margin_mins minutes before close — gradient toward earlier arrivals.
+    #    plant_win_margin_mins minutes before close ? gradient toward earlier arrivals.
     #    Rate: plant_win_margin_rate (default = plant_win_penalty * 0.5 km/h).
     plant_windows       = cfg.get("plant_windows", {})
     plant_win_rate      = cfg.get("plant_win_penalty", 200.0)          # km per hour outside
@@ -2286,7 +2286,7 @@ def _sheet_cost(blocks, dm, start_time, cfg):
                 dests3 = [{"key": dk3}] if dk3 else []
             n_farms3 = len(block3["rows"])
             for d_i3, dest_d3 in enumerate(dests3):
-                # Yard-for destinations are overnight parking — no receiving window
+                # Yard-for destinations are overnight parking ? no receiving window
                 if "yard for" in (dest_d3.get("name","") or "").lower():
                     continue
                 dk3 = normalise_key(dest_d3.get("key", "") or "")
@@ -2307,7 +2307,7 @@ def _sheet_cost(blocks, dm, start_time, cfg):
                 open_t3  = parse_hhmm(open_str3)
 
                 if not time_in_window(arr3, open_str3, close_str3):
-                    # Outside window — penalise by hours until next open
+                    # Outside window ? penalise by hours until next open
                     if open_t3 is not None:
                         open_dt3 = datetime.combine(date.today(), open_t3)
                         if open_t3 > arr3:
@@ -2340,14 +2340,14 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg):
     # Re-use _sheet_cost internals by running both and computing the breakdown.
     # We compute each component independently using the same logic as _sheet_cost.
 
-    # ── distance ─────────────────────────────────────────────────────────────
+    # ?? distance ?????????????????????????????????????????????????????????????
     total_km = 0.0
     for dists in calc_distances(blocks, dm):
         for d in dists[:-1]:
             if d is not None:
                 total_km += d
 
-    # ── shift time & milking ─────────────────────────────────────────────────
+    # ?? shift time & milking ?????????????????????????????????????????????????
     shift_hours  = 0.0
     milking_mins = 0.0
     all_times    = None
@@ -2396,7 +2396,7 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg):
                                 if end_w3 < arr_dt: end_w3 += timedelta(days=1)
                                 milking_mins += (end_w3 - arr_dt).total_seconds() / 60.0
 
-    # ── cap ───────────────────────────────────────────────────────────────────
+    # ?? cap ???????????????????????????????????????????????????????????????????
     hard_cap     = cfg.get("hard_vol_cap", VOL_LIMIT)
     cap_pen_rate = cfg.get("cap_penalty", 2.0)
     cap_pen      = 0.0
@@ -2426,15 +2426,15 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg):
         else:
             if total_fv > hard_cap: cap_pen += (total_fv - hard_cap) * cap_pen_rate
 
-    # ── overtime ──────────────────────────────────────────────────────────────
+    # ?? overtime ??????????????????????????????????????????????????????????????
     max_shift    = cfg.get("max_shift_h", 14.0)
     shift_pen    = max(0.0, shift_hours - max_shift) * cfg.get("shift_penalty", 200.0)
     shift_cost   = shift_hours * cfg.get("shift_hours_weight", 0.0)
 
-    # ── milking ───────────────────────────────────────────────────────────────
+    # ?? milking ???????????????????????????????????????????????????????????????
     milking_equiv = milking_mins * cfg.get("milking_weight", 1.0)
 
-    # ── plant window ──────────────────────────────────────────────────────────
+    # ?? plant window ??????????????????????????????????????????????????????????
     plant_windows     = cfg.get("plant_windows", {})
     plant_win_rate    = cfg.get("plant_win_penalty", 200.0)
     plant_margin_mins = cfg.get("plant_win_margin_mins", 30.0)
@@ -2590,7 +2590,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
     routes would reduce total cost.
 
     The MIP variables:
-      x[i,j] in {0,1}  —  route i is assigned to processor j
+      x[i,j] in {0,1}  ?  route i is assigned to processor j
 
     Objective: minimise  sum_{i,j} x[i,j] * last_leg_cost(i,j)
                        + vol_deviation_penalties
@@ -2599,9 +2599,9 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
 
     Constraints:
       Each route assigned to exactly one processor (from that route's
-      original candidate set — processors that appeared in the file for
+      original candidate set ? processors that appeared in the file for
       this colour group).
-      Processor volume balance within ±vol_tol of original.
+      Processor volume balance within �vol_tol of original.
       Truck capacity hard cap (as a big-M penalty rather than a hard cut,
       to keep the MIP feasible when data itself exceeds cap).
 
@@ -2611,9 +2611,9 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
         from scipy.optimize import linprog, milp, LinearConstraint, Bounds
         import numpy as np
     except ImportError:
-        return "  [HiGHS check] scipy not available — skipping verification."
+        return "  [HiGHS check] scipy not available ? skipping verification."
 
-    # ── gather route data from ALNS result ───────────────────────────────────
+    # ?? gather route data from ALNS result ???????????????????????????????????
     # state is list of (sname, blocks); map to flat list of route descriptors
     route_records = []   # {sname, block_idx, block, vol, start_time}
     for sname, blocks in state:
@@ -2636,7 +2636,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
         if d.get("key")
     })
     if not dest_keys or not route_records:
-        return f"  [{colour}] HiGHS: no routes or processors — skipping."
+        return f"  [{colour}] HiGHS: no routes or processors ? skipping."
 
     n_routes = len(route_records)
     n_procs  = len(dest_keys)
@@ -2648,7 +2648,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
         if dests: return dests[0].get("key") or "?"
         return rec["block"].get("dest_key") or "?"
 
-    # original processor volumes (from ALNS result — used for tolerance bounds)
+    # original processor volumes (from ALNS result ? used for tolerance bounds)
     orig_dest_vols = {}
     for sname, entry_orig in sheets:
         for block in entry_orig.get("blocks", []):
@@ -2667,7 +2667,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
                 already += off
                 orig_dest_vols[dk] = orig_dest_vols.get(dk, 0.0) + off
 
-    # ── cost coefficients c[i*n_procs + j] ──────────────────────────────────
+    # ?? cost coefficients c[i*n_procs + j] ??????????????????????????????????
     # Cost = last-farm-to-processor leg distance (km via dm, or duration if dm_dur)
     # We use the same units as _sheet_cost (km-equivalent).
     # Shift penalty and cap penalty encoded as additive per-assignment costs.
@@ -2688,13 +2688,13 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
             cap_contrib = max(0.0, rec["vol"] - hard_cap) * cap_pen_rate
             c.append(leg_cost + cap_contrib)
 
-    # ── integrality: all binary ───────────────────────────────────────────────
+    # ?? integrality: all binary ???????????????????????????????????????????????
     integrality = [1] * (n_routes * n_procs)  # 1 = integer
 
-    # ── bounds: 0 ≤ x ≤ 1 ────────────────────────────────────────────────────
+    # ?? bounds: 0 ? x ? 1 ????????????????????????????????????????????????????
     bounds = Bounds(lb=0.0, ub=1.0)
 
-    # ── equality constraint: each route assigned to exactly one processor ─────
+    # ?? equality constraint: each route assigned to exactly one processor ?????
     # sum_j x[i,j] = 1  for each i
     A_eq_rows, b_eq = [], []
     for i in range(n_routes):
@@ -2704,7 +2704,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
         A_eq_rows.append(row)
         b_eq.append(1.0)
 
-    # ── inequality constraints: volume tolerance per processor ────────────────
+    # ?? inequality constraints: volume tolerance per processor ????????????????
     # sum_i vol_i * x[i,j]  <=  orig_vol_j * (1 + vol_tol)
     # sum_i vol_i * x[i,j]  >=  orig_vol_j * (1 - vol_tol)   [as <= with negation]
     A_ineq_rows, b_ineq = [], []
@@ -2747,7 +2747,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
     if not result.success:
         return f"  [{colour}] HiGHS: no feasible processor assignment found ({result.message})."
 
-    # ── compute current (ALNS) last-leg cost for comparison ──────────────────
+    # ?? compute current (ALNS) last-leg cost for comparison ??????????????????
     current_cost = 0.0
     for i, rec in enumerate(route_records):
         cur_dk = _route_current_dest(rec)
@@ -2757,15 +2757,15 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
     mip_cost = result.fun
     improvement = current_cost - mip_cost
 
-    lines = [f"\n── [{colour}] HiGHS Processor Assignment Verification ──"]
+    lines = [f"\n?? [{colour}] HiGHS Processor Assignment Verification ??"]
     lines.append(f"   ALNS last-leg + cap cost : {current_cost:,.1f} km-eq")
     lines.append(f"   MIP optimal cost          : {mip_cost:,.1f} km-eq")
 
     THRESHOLD = 0.5   # ignore sub-km differences (floating point noise)
     if improvement <= THRESHOLD:
-        lines.append("   ✓ Processor assignment is OPTIMAL — no improvement possible.")
+        lines.append("   ? Processor assignment is OPTIMAL ? no improvement possible.")
     else:
-        lines.append(f"   ✦ Improvement available   : {improvement:,.1f} km-eq")
+        lines.append(f"   ? Improvement available   : {improvement:,.1f} km-eq")
         lines.append("   Suggested reassignments:")
         x_sol = result.x
         for i, rec in enumerate(route_records):
@@ -2779,15 +2779,15 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
                 best_cost_leg = c[i * n_procs + best_j]
                 lines.append(
                     f"     Sheet {rec['sname']!r} block {rec['bi']+1}: "
-                    f"{cur_dk} → {best_dk}  "
+                    f"{cur_dk} ? {best_dk}  "
                     f"(last farm {last}, "
-                    f"leg {cur_cost_leg:.1f} → {best_cost_leg:.1f} km-eq)")
+                    f"leg {cur_cost_leg:.1f} ? {best_cost_leg:.1f} km-eq)")
     return "\n".join(lines)
 
 
 class IntraRouteOptimiser(QThread):
     """Applies 2-opt + or-opt within every route until convergence.
-    No cross-route moves — pure within-block reordering."""
+    No cross-route moves ? pure within-block reordering."""
     progress = pyqtSignal(int, int, str)   # cur, total, status
     finished = pyqtSignal(dict)            # {(fname,sname): improved_blocks}
     log      = pyqtSignal(str)
@@ -2816,7 +2816,7 @@ class IntraRouteOptimiser(QThread):
             blocks = copy.deepcopy(
                 self.sheet_mods.get(key, entry.get("blocks", [])))
 
-            self.progress.emit(cur, total, f"Optimising {sname}…")
+            self.progress.emit(cur, total, f"Optimising {sname}?")
 
             improved = True
             changed  = False
@@ -2871,7 +2871,7 @@ class IntraRouteOptimiser(QThread):
                 n_improved += 1
 
         self.progress.emit(total, total, "Done")
-        self.log.emit(f"Intra-route optimisation complete — {n_improved} route(s) improved")
+        self.log.emit(f"Intra-route optimisation complete ? {n_improved} route(s) improved")
         self.finished.emit(results)
 
 
@@ -2931,9 +2931,9 @@ class ALNSSolver(QThread):
     colour, and block destinations (dest_key) may also be reassigned.
 
     Three paired move types, each with its own adaptive weight:
-      1. Farm move   — destroy (random | worst) + repair (best-insert | regret)
-      2. Dest move   — strip dest_keys from n blocks + regret-order reassignment
-      3. Combined    — both farm and dest moves together
+      1. Farm move   ? destroy (random | worst) + repair (best-insert | regret)
+      2. Dest move   ? strip dest_keys from n blocks + regret-order reassignment
+      3. Combined    ? both farm and dest moves together
 
     Simulated-annealing acceptance; alpha auto-computed from user's
     target_cool_frac and iteration count.
@@ -2964,12 +2964,12 @@ class ALNSSolver(QThread):
     def stop(self):
         self._stop = True
 
-    # ── group-level cost ──────────────────────────────────────────────────────
+    # ?? group-level cost ??????????????????????????????????????????????????????
 
     def _group_cost(self, state, orig_dest_vols, sheet_cost_cache=None):
         """Full cost: sum per-sheet costs + group-wide volume penalty.
 
-        sheet_cost_cache: optional dict {sname: cost} — if provided, sheets
+        sheet_cost_cache: optional dict {sname: cost} ? if provided, sheets
         present in the cache are not recomputed.  Callers that know which sheets
         changed can pass a partial cache to skip unchanged sheets entirely.
         """
@@ -2996,7 +2996,7 @@ class ALNSSolver(QThread):
             cache[sname] = _sheet_cost(blocks, self.dm, st, self.cfg)
         return cache
 
-    # ── flat farm list ────────────────────────────────────────────────────────
+    # ?? flat farm list ????????????????????????????????????????????????????????
 
     def _flatten_farms(self, state):
         out = []
@@ -3006,9 +3006,9 @@ class ALNSSolver(QThread):
                     out.append((s_idx, b_idx, farm))
         return out
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
     # FARM destroy / repair
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
 
     def _destroy_random(self, state, n_remove):
         """Remove n_remove random farms.
@@ -3019,9 +3019,9 @@ class ALNSSolver(QThread):
         for s_idx, (sname, blocks) in enumerate(state):
             for b_idx, block in enumerate(blocks):
                 if _is_preload_block(block):
-                    continue   # frozen — previous-day load, no farms anyway
+                    continue   # frozen ? previous-day load, no farms anyway
                 if _is_fixed_vol_block(block):
-                    continue   # frozen — explicit vol_partial on every dest
+                    continue   # frozen ? explicit vol_partial on every dest
                 for f_idx in range(len(block["rows"])):
                     flat.append((s_idx, b_idx, f_idx))
         if not flat:
@@ -3056,7 +3056,7 @@ class ALNSSolver(QThread):
                 if _is_preload_block(block):
                     continue   # frozen
                 if _is_fixed_vol_block(block):
-                    continue   # frozen — explicit vol_partial on every dest
+                    continue   # frozen ? explicit vol_partial on every dest
                 for f_idx in range(len(block["rows"])):
                     trial = copy.deepcopy(blocks)
                     trial[b_idx]["rows"].pop(f_idx)
@@ -3117,16 +3117,16 @@ class ALNSSolver(QThread):
         return best_b, best_pos, best_cost
 
     def _repair_best(self, state, removed):
-        """Greedy best-insertion: each farm → cheapest slot across whole group.
+        """Greedy best-insertion: each farm ? cheapest slot across whole group.
 
-        Sheets with no start_time are frozen — reliable arrival estimates
+        Sheets with no start_time are frozen ? reliable arrival estimates
         require a real shift start; without one the sheet is skipped entirely.
         Farms are inserted most-constrained-first (highest minimum insertion
         cost) so hard-to-place farms claim their preferred slot before easier
         ones, reducing cascades of suboptimal placements.
         """
         state = copy.deepcopy(state)
-        # Per-sheet start times. None → no start time → sheet is frozen.
+        # Per-sheet start times. None ? no start time ? sheet is frozen.
         start_map = {}
         for sname, blocks in state:
             entry = self.cache.get(self.fname, {}).get(sname, {})
@@ -3138,7 +3138,7 @@ class ALNSSolver(QThread):
                     if start_map.get(sname) is not None]
 
         # Pre-compute baseline _sheet_cost for each eligible sheet.
-        # This saves one _sheet_cost call per (farm × sheet) combination —
+        # This saves one _sheet_cost call per (farm � sheet) combination ?
         # with 20 removed farms and 27 sheets that's 540 saved calls per repair.
         baseline_cache = {
             sname: _sheet_cost(blocks, self.dm, start_map[sname], self.cfg)
@@ -3184,7 +3184,7 @@ class ALNSSolver(QThread):
         """
         state   = copy.deepcopy(state)
         pending = list(removed)
-        # Per-sheet start times. None → frozen.
+        # Per-sheet start times. None ? frozen.
         start_map = {}
         for sname, blocks in state:
             entry = self.cache.get(self.fname, {}).get(sname, {})
@@ -3210,7 +3210,7 @@ class ALNSSolver(QThread):
                 slot_costs = []
                 for s_idx, (sname, blocks) in enumerate(state):
                     if s_idx not in eligible_idxs:
-                        continue   # sheet has no start time — frozen
+                        continue   # sheet has no start time ? frozen
                     b_idx, pos, c = self._best_insert_cost(blocks, farm, self.dm,
                                                             shift_start=start_map[sname],
                                                             baseline=baseline_cache[sname])
@@ -3237,9 +3237,9 @@ class ALNSSolver(QThread):
                 state[s_idx][1], self.dm, start_map[sname_mod], self.cfg)
         return state, cross_route
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
     # DEST destroy / repair
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
 
     @staticmethod
     def _acc_block_vols(block, vols_dict):
@@ -3270,7 +3270,7 @@ class ALNSSolver(QThread):
             if (block.get("dests") or block.get("dest_key"))
                and not _is_holdover_block(block)    # yard-for dest stays fixed
                and not _is_preload_block(block)      # preload block fully frozen
-               and not _is_fixed_vol_block(block)    # fixed vol_partial — operational instruction
+               and not _is_fixed_vol_block(block)    # fixed vol_partial ? operational instruction
         ]
         if not candidates:
             return state, []
@@ -3335,7 +3335,7 @@ class ALNSSolver(QThread):
             # Guard: if dests_list is fully capped (every dest has fixed vol_partial,
             # i.e. no catch-all remainder), the total deliverable volume is fixed at
             # the sum of all vol_partials.  If the block's farm_vol exceeds that cap,
-            # assigning this dest list here silently drops the overflow — identical to
+            # assigning this dest list here silently drops the overflow ? identical to
             # the _is_fixed_vol_block problem.  Apply a prohibitive overflow penalty.
             if dests_list and dests_list[-1].get("vol_partial") is not None:
                 dest_cap = sum(float(d.get("vol_partial") or 0) for d in dests_list)
@@ -3372,7 +3372,7 @@ class ALNSSolver(QThread):
                 lo = orig * (1.0 - vol_tol); hi = orig * (1.0 + vol_tol)
                 vol_pen += (max(0.0, lo - new_v) + max(0.0, new_v - hi)) * vol_rate
 
-            # Plant window penalty — skip for yard-for destinations (24/7 parking)
+            # Plant window penalty ? skip for yard-for destinations (24/7 parking)
             win_pen = 0.0
             is_yard_dests = all("yard for" in (d.get("name","") or "").lower()
                                 for d in dests_list if d.get("name"))
@@ -3438,7 +3438,7 @@ class ALNSSolver(QThread):
                     key=lambda x: x[0]
                 )
                 if not costs:
-                    # Every slot already has dests — just pick cheapest overall
+                    # Every slot already has dests ? just pick cheapest overall
                     costs = sorted(
                         ((_attach_cost(s2, b2, dests_list), (s2, b2))
                          for s2, b2 in all_slots),
@@ -3476,15 +3476,15 @@ class ALNSSolver(QThread):
 
         return state
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
     # DEST permutation & volume-split operators
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
 
     def _shuffle_dests(self, state, orig_dest_vols):
         """
         Pick one random multi-dest block and try all permutations of its dest
         list.  Returns the state with the best permutation applied to that
-        block only — SA in the main loop decides whether to accept.
+        block only ? SA in the main loop decides whether to accept.
         Single-block change keeps the move small and well-defined for SA.
         """
         from itertools import permutations as _perms
@@ -3545,9 +3545,9 @@ class ALNSSolver(QThread):
         block["dest_name"] = block["dests"][0].get("name","")
         return state
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
     # Intra-block resequencing operators  (2-opt and Or-opt)
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
 
     def _two_opt_single(self, state):
         """Pick one random eligible block; find and apply its best 2-opt swap.
@@ -3684,9 +3684,9 @@ class ALNSSolver(QThread):
                     blocks[b_idx] = state[s_idx][1][b_idx]
         return state
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
     # Top-level roulette
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
 
     def _roulette(self, scores, min_prob=0.0, floors=None, ceilings=None):
         """
@@ -3722,9 +3722,9 @@ class ALNSSolver(QThread):
                 return k
         return keys[-1]
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
     # Main ALNS loop
-    # ══════════════════════════════════════════════════════════════════════════
+    # ??????????????????????????????????????????????????????????????????????????
 
     def _solve_group(self, colour, sheets, total_iters, iter_offset):
         if not sheets:
@@ -3741,7 +3741,7 @@ class ALNSSolver(QThread):
 
         dest_catalogue = _group_dest_catalogue(sheets)
 
-        # initial state — start from mod_blocks if available (preserves _two_hr_win
+        # initial state ? start from mod_blocks if available (preserves _two_hr_win
         # and _orig_arr flags set by the user); fall back to cache blocks.
         def _initial_blocks(sname, entry):
             mod_key = (self.fname, sname)
@@ -3821,12 +3821,12 @@ class ALNSSolver(QThread):
         # The adaptive roulette learns which moves improve cost and rewards them.
         # Without a floor, farm/combined moves get penalised whenever they fail
         # to beat the plant-window penalty (which dominates early on), causing
-        # intra-block 2-opt/or-opt to dominate by iteration 200 — exactly the
+        # intra-block 2-opt/or-opt to dominate by iteration 200 ? exactly the
         # behaviour we observed.  Hard floors guarantee a minimum budget for
         # cross-route moves regardless of adaptive history.
         #
         # Floors (min_prob passed to _roulette):
-        #   farm:     0.25  — guaranteed 25% of iterations move farms cross-route
+        #   farm:     0.25  ? guaranteed 25% of iterations move farms cross-route
         #   combined: 0.15
         #   dest:     0.10
         #   2opt:     0.05
@@ -3855,7 +3855,7 @@ class ALNSSolver(QThread):
             "farm":     3.0,   # primary cross-route move
             "combined": 3.0,   # cross-route + dest reassignment
             "dest":     1.5,   # dest-only reassignment
-            "2opt":     0.5,   # intra-block only — useful but deprioritised
+            "2opt":     0.5,   # intra-block only ? useful but deprioritised
             "or_opt":   0.5,
         }
 
@@ -3874,10 +3874,10 @@ class ALNSSolver(QThread):
 
         self.log.emit(
             f"[{colour}]  sheets={len(sheets)}  farms={n_farms}  "
-            f"blocks={n_blocks}  cost₀={best_cost:.1f}  (cost_no_win={cost_no_win:.1f})\n"
-            f"          α={alpha:.6f}  T₀={T0:.1f} (from cost_no_win)  "
+            f"blocks={n_blocks}  cost?={best_cost:.1f}  (cost_no_win={cost_no_win:.1f})\n"
+            f"          ?={alpha:.6f}  T?={T0:.1f} (from cost_no_win)  "
             f"cool_target={target_cool_frac*100:.4f}%\n"
-            f"          remove/move: farms=T-scaled[3→30]  dests={n_remove_dests}  "
+            f"          remove/move: farms=T-scaled[3?30]  dests={n_remove_dests}  "
             f"floors: farm={FARM_FLOOR:.0%} combined={COMBINED_FLOOR:.0%} "
             f"dest={DEST_FLOOR:.0%} intra={INTRA_FLOOR:.0%}"
         )
@@ -3891,7 +3891,7 @@ class ALNSSolver(QThread):
             if self._stop:
                 break
 
-            # Decay all scores each segment — just multiply, no hard floor
+            # Decay all scores each segment ? just multiply, no hard floor
             # on raw scores since the probability floor handles balance.
             if it % seg_size == 0 and it > 0:
                 for d in (move_scores, d_scores, r_scores):
@@ -3910,7 +3910,7 @@ class ALNSSolver(QThread):
             # Track which sheets are modified so we only recompute their costs.
             changed_sheets = set()
 
-            # ── execute chosen move ───────────────────────────────────────────
+            # ?? execute chosen move ???????????????????????????????????????????
             if move_type == "farm":
                 d_op = self._roulette(d_scores, min_prob=OP_MIN_PROB)
                 r_op = self._roulette(r_scores, min_prob=OP_MIN_PROB)
@@ -3923,7 +3923,7 @@ class ALNSSolver(QThread):
                     new_state, _cr = self._repair_best(new_state, removed)
                 else:
                     new_state, _cr = self._repair_regret(new_state, removed)
-                # Repair may place farms on any sheet — track destinations too
+                # Repair may place farms on any sheet ? track destinations too
                 for s_idx, (sn, _) in enumerate(new_state):
                     if any(sn == state[s][0] for s, _, _ in removed):
                         changed_sheets.add(sn)
@@ -3943,7 +3943,7 @@ class ALNSSolver(QThread):
 
             elif move_type == "2opt":
                 new_state = self._two_opt_single(state)
-                # 2-opt touches one block on one sheet — detect by row count change
+                # 2-opt touches one block on one sheet ? detect by row count change
                 for s_idx, (sn, blocks) in enumerate(new_state):
                     if blocks != state[s_idx][1]:
                         changed_sheets.add(sn)
@@ -3989,7 +3989,7 @@ class ALNSSolver(QThread):
             new_cost = sum(new_sheet_cache.values()) + _group_vol_penalty(new_state, orig_dest_vols, self.cfg) - frozen_cost_offset
             delta    = new_cost - cur_cost
 
-            # SA acceptance — compute probability explicitly for diagnostics
+            # SA acceptance ? compute probability explicitly for diagnostics
             if delta < 0:
                 accept_prob = 1.0
             elif T > 1e-12:
@@ -4039,7 +4039,7 @@ class ALNSSolver(QThread):
 
             T *= alpha
 
-            # ── Every 50 iterations: detailed diagnostic output ──────────────
+            # ?? Every 50 iterations: detailed diagnostic output ??????????????
             if it % 50 == 49:
                 bd_best = _sheet_cost_breakdown_state(best_state, self.dm, self.cache, self.fname, self.cfg)
                 vol_pen_d = _group_vol_penalty(best_state, orig_dest_vols, self.cfg)
@@ -4057,7 +4057,7 @@ class ALNSSolver(QThread):
                 for dk_d, orig_v in sorted(orig_dest_vols.items()):
                     cur_v = dest_vols_d.get(dk_d, 0.0)
                     pct = (cur_v / orig_v * 100) if orig_v else 0
-                    flag = " ⚠" if abs(cur_v - orig_v) > orig_v * vol_tol_d else ""
+                    flag = " ?" if abs(cur_v - orig_v) > orig_v * vol_tol_d else ""
                     vol_lines.append(
                         f"      {dk_d}: {cur_v:>8,.0f} / {orig_v:>8,.0f} L  ({pct:5.1f}%){flag}")
 
@@ -4067,14 +4067,14 @@ class ALNSSolver(QThread):
                 for k in move_scores:
                     tried = diag_tried.get(k, 0)
                     acc   = diag_accepted.get(k, 0)
-                    acc_parts.append(f"{k}={acc}/{tried}" if tried else f"{k}=—")
+                    acc_parts.append(f"{k}={acc}/{tried}" if tried else f"{k}=?")
 
                 self.log.emit(
-                    f"  [{colour}] ── it={it+1} ──  best={best_cost:.1f}\n"
+                    f"  [{colour}] ?? it={it+1} ??  best={best_cost:.1f}\n"
                     f"    Cost breakdown: km={bd_best['km']:.1f}  shift={bd_best['shift']:.1f}"
                     f"  shift_pen={bd_best['overtime']:.1f}  milking={bd_best['milking']:.1f}"
                     f"  cap={bd_best['cap']:.1f}  vol_pen={vol_pen_d:.1f}\n"
-                    f"    T={T:.2f}  50% accept if ΔZ<{t50:.1f}  10% if ΔZ<{t10:.1f}\n"
+                    f"    T={T:.2f}  50% accept if ?Z<{t50:.1f}  10% if ?Z<{t10:.1f}\n"
                     f"    Accepted/tried (last 50): {('  '.join(acc_parts))}\n"
                     f"    Cross-route placements (last 50 farm/combined moves): {diag_cross_route}\n"
                     f"    Processor volumes:\n" + "\n".join(vol_lines)
@@ -4120,8 +4120,8 @@ class ALNSSolver(QThread):
 
         output_farms = sum(len(b["rows"]) for _, blocks in best_state for b in blocks)
         output_vol   = _state_vol(best_state)
-        farm_ok = "✓" if output_farms == input_farms else f"⚠ LOST {input_farms - output_farms}"
-        vol_ok  = "✓" if abs(output_vol - input_vol) < 1 else f"⚠ LOST {input_vol - output_vol:,.0f}L"
+        farm_ok = "?" if output_farms == input_farms else f"? LOST {input_farms - output_farms}"
+        vol_ok  = "?" if abs(output_vol - input_vol) < 1 else f"? LOST {input_vol - output_vol:,.0f}L"
 
         # Full cost breakdown for the final best state
         _km_f = _shift_f = _shift_pen_f = _milking_f = _cap_f = _win_f = 0.0
@@ -4158,17 +4158,17 @@ class ALNSSolver(QThread):
         _plant_win_f = best_cost - _km_f - _shift_f - _shift_pen_f - _milking_f - _cap_f - _vol_pen_f
 
         self.log.emit(
-            f"[{colour}] Done — best={best_cost:.1f}  "
+            f"[{colour}] Done ? best={best_cost:.1f}  "
             f"(started {self._group_cost([(sname, copy.deepcopy(entry.get('blocks',[]))) for sname,entry in sheets], orig_dest_vols):.1f})\n"
-            f"  farms: {input_farms}→{output_farms} {farm_ok}  "
-            f"vol: {input_vol:,.0f}→{output_vol:,.0f}L {vol_ok}\n"
+            f"  farms: {input_farms}?{output_farms} {farm_ok}  "
+            f"vol: {input_vol:,.0f}?{output_vol:,.0f}L {vol_ok}\n"
             f"  Cost breakdown:\n"
             f"    km={_km_f:.1f}  milking={_milking_f:.1f}  shift={_shift_f:.1f}"
             f"  overtime={_shift_pen_f:.1f}  cap={_cap_f:.1f}"
             f"  plant_win={_plant_win_f:.1f}  vol_pen={_vol_pen_f:.1f}"
         )
 
-        # ── Farm displacement summary ─────────────────────────────────────────
+        # ?? Farm displacement summary ?????????????????????????????????????????
         # Compare each farm's original (sname, b_idx) placement against the
         # solved best_state.  A farm is identified by its _uid if available,
         # otherwise by (irma, prior_vol) as a fallback key.
@@ -4178,14 +4178,14 @@ class ALNSSolver(QThread):
                 return uid
             return (farm.get("irma",""), farm.get("prior_vol", 0))
 
-        # Build original placement map: farm_key → (sname, b_idx)
+        # Build original placement map: farm_key ? (sname, b_idx)
         orig_placement = {}
         for sname, entry in sheets:
             for b_idx, block in enumerate(entry.get("blocks", [])):
                 for farm in block.get("rows", []):
                     orig_placement[_farm_key(farm)] = (sname, b_idx)
 
-        # Build solved placement map: farm_key → (sname, b_idx)
+        # Build solved placement map: farm_key ? (sname, b_idx)
         solved_placement = {}
         for sname, blocks in best_state:
             for b_idx, block in enumerate(blocks):
@@ -4217,24 +4217,24 @@ class ALNSSolver(QThread):
         # Post-solve: apply exhaustive 2-opt to every block in best_state.
         # This is deterministic, never worsens the solution, and recovers
         # any intra-block ordering improvements the ALNS loop may have missed.
-        self.log.emit(f"[{colour}] Applying 2-opt polish pass…")
+        self.log.emit(f"[{colour}] Applying 2-opt polish pass?")
         best_state_list = [(sn, blks) for sn, blks in best_state]
         polished = self._two_opt_all_blocks(best_state_list)
         polished_cost = self._group_cost(polished, orig_dest_vols)
         if polished_cost < best_cost:
             self.log.emit(
-                f"[{colour}] 2-opt improved {best_cost:.1f} → {polished_cost:.1f}"
+                f"[{colour}] 2-opt improved {best_cost:.1f} ? {polished_cost:.1f}"
             )
             best_state = polished
             best_cost  = polished_cost
 
         # Post-solve: exhaustively optimise destination order on every multi-dest
         # block.  _shuffle_dests was previously a stochastic SA move but is
-        # deterministic — it always returns the best permutation.  Running it
+        # deterministic ? it always returns the best permutation.  Running it
         # in the SA loop just burned iterations for free improvements and inflated
         # the adaptive scores of non-exploratory moves.  Here it runs once over
         # every eligible block after the search is complete.
-        self.log.emit(f"[{colour}] Applying destination-order polish pass…")
+        self.log.emit(f"[{colour}] Applying destination-order polish pass?")
         shuffled = copy.deepcopy([(sn, blks) for sn, blks in best_state])
         for s_idx, (sn, blocks) in enumerate(shuffled):
             for b_idx, block in enumerate(blocks):
@@ -4243,7 +4243,7 @@ class ALNSSolver(QThread):
                 dests = block.get("dests") or []
                 if len(dests) < 2 or len(dests) > 5:
                     continue
-                # _shuffle_dests picks a random block — call it directly per block
+                # _shuffle_dests picks a random block ? call it directly per block
                 trial_state = shuffled
                 improved_state = self._shuffle_dests(trial_state, orig_dest_vols)
                 # Only keep if it improved
@@ -4255,7 +4255,7 @@ class ALNSSolver(QThread):
         if shuffled_cost < self._group_cost([(sn, blks) for sn, blks in best_state],
                                              orig_dest_vols):
             self.log.emit(
-                f"[{colour}] Dest-order polish improved → {shuffled_cost:.1f}"
+                f"[{colour}] Dest-order polish improved ? {shuffled_cost:.1f}"
             )
             best_state = shuffled
 
@@ -4265,7 +4265,7 @@ class ALNSSolver(QThread):
         fname  = self.fname
         cache  = self.cache
         # Seed the RNG when the user supplied one, so a given (input, settings,
-        # seed) triple reproduces exactly. None → leave the global RNG alone.
+        # seed) triple reproduces exactly. None ? leave the global RNG alone.
         seed = self.cfg.get("seed")
         if seed is not None:
             random.seed(seed)
@@ -4282,11 +4282,11 @@ class ALNSSolver(QThread):
                     if _is_preload_block(block):
                         holdover_info.append(
                             f"  [{colour_g}] Sheet {sname} block {bi+1}: "
-                            f"PRELOAD (fully frozen) → {', '.join(dnames)}")
+                            f"PRELOAD (fully frozen) ? {', '.join(dnames)}")
                     elif _is_holdover_block(block):
                         holdover_info.append(
                             f"  [{colour_g}] Sheet {sname} block {bi+1}: "
-                            f"holdover (farms free, dest fixed) → {', '.join(dnames)}")
+                            f"holdover (farms free, dest fixed) ? {', '.join(dnames)}")
                     elif _is_fixed_vol_block(block):
                         vps = ", ".join(
                             f"{d.get('name','?')}={d.get('vol_partial',0):,.0f}L"
@@ -4294,7 +4294,7 @@ class ALNSSolver(QThread):
                         )
                         holdover_info.append(
                             f"  [{colour_g}] Sheet {sname} block {bi+1}: "
-                            f"fixed-vol (fully frozen) → {vps}")
+                            f"fixed-vol (fully frozen) ? {vps}")
         if holdover_info:
             self.log.emit("Preload / holdover blocks detected:\n" +
                           "\n".join(holdover_info))
@@ -4310,8 +4310,8 @@ class ALNSSolver(QThread):
         results.update(red_result)
         results.update(blue_result)
 
-        # ── HiGHS post-optimality processor assignment check ─────────────────
-        self.log.emit("\nRunning HiGHS processor-assignment verification…")
+        # ?? HiGHS post-optimality processor assignment check ?????????????????
+        self.log.emit("\nRunning HiGHS processor-assignment verification?")
         for colour, sheets in [("RED", groups["RED"]), ("BLUE", groups["BLUE"])]:
             if not sheets:
                 continue
@@ -4326,7 +4326,218 @@ class ALNSSolver(QThread):
         self.finished.emit(results)
 
 
-# ── Main window ───────────────────────────────────────────────────────────────
+# ?? IRMA Lookup Dialog ????????????????????????????????????????????????????????
+
+class IRMALookupDialog(QDialog):
+    """Cross-file, cross-sheet IRMA farm lookup.
+
+    Given a full or partial IRMA number, searches every loaded file and sheet
+    (both original parsed data and solver-modified routes) and lists every
+    block that contains a matching farm.  Double-clicking a result navigates
+    the main window to that file/sheet.
+
+    Results table columns:
+        File | Sheet | Route | Block # | Farm position | IRMA | Source
+    where Source is 'Original', 'Modified', or 'Both'.
+    """
+
+    # Emitted when the user double-clicks a result row so MainWindow can
+    # navigate without the dialog needing a direct reference to it.
+    # Payload: (fname, sname)
+    navigate_requested = pyqtSignal(str, str)
+
+    def __init__(self, cache, sheet_mods, parent=None):
+        """
+        cache       : MainWindow._cache  ? {fname: {sname: {blocks, ...}}}
+        sheet_mods  : MainWindow._sheet_mods ? {(fname,sname): mod_blocks}
+        """
+        super().__init__(parent)
+        self.setWindowTitle("IRMA Farm Lookup")
+        self.setMinimumSize(820, 480)
+        self._cache      = cache
+        self._sheet_mods = sheet_mods
+        self._results    = []   # list of result dicts, parallel to table rows
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # ?? Search bar ???????????????????????????????????????????????????????
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("IRMA number:"))
+        self._query = QLineEdit()
+        self._query.setPlaceholderText(
+            "Full (71-117) or partial (71)  ?  Enter to search")
+        self._query.setFont(QFont("Segoe UI", 10))
+        self._query.setMinimumWidth(200)
+        bar.addWidget(self._query, stretch=1)
+
+        self._search_btn = QPushButton("Search")
+        self._search_btn.setFixedHeight(28)
+        self._search_btn.setStyleSheet(
+            "QPushButton { background:#1565c0; color:white; font-weight:bold; "
+            "border-radius:3px; padding: 0 12px; } "
+            "QPushButton:disabled { background:#90caf9; }")
+        bar.addWidget(self._search_btn)
+
+        self._chk_orig = QCheckBox("Original")
+        self._chk_orig.setChecked(True)
+        self._chk_mod  = QCheckBox("Modified")
+        self._chk_mod.setChecked(True)
+        bar.addWidget(self._chk_orig)
+        bar.addWidget(self._chk_mod)
+        layout.addLayout(bar)
+
+        # ?? Status label ????????????????????????????????????????????????????
+        self._status = QLabel("Enter an IRMA number and press Search or Enter.")
+        self._status.setFont(QFont("Segoe UI", 9))
+        layout.addWidget(self._status)
+
+        # ?? Results table ????????????????????????????????????????????????????
+        RESULT_COLS = ["File", "Sheet", "Route", "Block #",
+                       "Position in block", "IRMA", "Source"]
+        self._table = QTableWidget(0, len(RESULT_COLS))
+        self._table.setHorizontalHeaderLabels(RESULT_COLS)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setFont(QFont("Segoe UI", 9))
+        self._table.setToolTip("Double-click a row to navigate to that sheet")
+        layout.addWidget(self._table, stretch=1)
+
+        # ?? Bottom buttons ???????????????????????????????????????????????????
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(80)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        # ?? Connections ??????????????????????????????????????????????????????
+        self._query.returnPressed.connect(self._run_search)
+        self._search_btn.clicked.connect(self._run_search)
+        self._table.cellDoubleClicked.connect(self._on_double_click)
+
+    # ?? Search logic ?????????????????????????????????????????????????????????
+
+    def _run_search(self):
+        query = self._query.text().strip().upper()
+        self._table.setRowCount(0)
+        self._results = []
+
+        if not query:
+            self._status.setText("Enter an IRMA number and press Search or Enter.")
+            return
+
+        search_orig = self._chk_orig.isChecked()
+        search_mod  = self._chk_mod.isChecked()
+
+        if not search_orig and not search_mod:
+            self._status.setText("Select at least one of Original / Modified.")
+            return
+
+        hits = []   # list of dicts
+
+        for fname, sheets in self._cache.items():
+            for sname, entry in sheets.items():
+                if not isinstance(entry, dict):
+                    continue
+
+                orig_blocks = entry.get("blocks", [])
+                mod_blocks  = self._sheet_mods.get((fname, sname))
+
+                # Collect matching farms from each source independently so we
+                # can report whether a farm appears in Original, Modified, or both.
+                def _scan(blocks, source_label):
+                    found = []
+                    for b_idx, block in enumerate(blocks):
+                        route = block.get("route", "") or ""
+                        for f_idx, row in enumerate(block.get("rows", [])):
+                            irma = (row.get("irma") or "").strip().upper()
+                            if query in irma:
+                                found.append({
+                                    "fname":   fname,
+                                    "sname":   sname,
+                                    "route":   route,
+                                    "b_idx":   b_idx,
+                                    "f_idx":   f_idx,
+                                    "irma":    row.get("irma", "").strip(),
+                                    "source":  source_label,
+                                })
+                    return found
+
+                orig_hits = _scan(orig_blocks, "Original") if search_orig else []
+                mod_hits  = _scan(mod_blocks,  "Modified") if (search_mod and mod_blocks) else []
+
+                # Merge: if the same (block, position, irma) appears in both,
+                # collapse into a single "Both" row rather than duplicating.
+                def _key(h):
+                    return (h["b_idx"], h["f_idx"], h["irma"])
+
+                orig_keys = {_key(h): h for h in orig_hits}
+                mod_keys  = {_key(h): h for h in mod_hits}
+
+                for k, h in orig_keys.items():
+                    if k in mod_keys:
+                        h_copy = dict(h); h_copy["source"] = "Both"
+                        hits.append(h_copy)
+                    else:
+                        hits.append(h)
+                for k, h in mod_keys.items():
+                    if k not in orig_keys:
+                        hits.append(h)
+
+        # Sort: file ? sheet ? block ? position
+        hits.sort(key=lambda h: (h["fname"], h["sname"], h["b_idx"], h["f_idx"]))
+
+        if not hits:
+            self._status.setText(
+                f"No routes found containing IRMA matching '{query}'.")
+            return
+
+        self._status.setText(
+            f"{len(hits)} result{'s' if len(hits) != 1 else ''} "
+            f"for '{query}' ? double-click a row to navigate.")
+
+        SOURCE_COLOURS = {
+            "Original": QColor("#e8f5e9"),   # light green
+            "Modified": QColor("#e3f2fd"),   # light blue
+            "Both":     QColor("#fff8e1"),   # light amber
+        }
+
+        self._table.setRowCount(len(hits))
+        self._results = hits
+
+        for row_idx, h in enumerate(hits):
+            bg = SOURCE_COLOURS.get(h["source"], QColor("#ffffff"))
+            values = [
+                h["fname"],
+                h["sname"],
+                h["route"] or "?",
+                str(h["b_idx"] + 1),
+                f"Farm {h['f_idx'] + 1}",
+                h["irma"],
+                h["source"],
+            ]
+            for col_idx, val in enumerate(values):
+                item = QTableWidgetItem(val)
+                item.setBackground(bg)
+                if col_idx == 5:   # IRMA column ? bold
+                    f = item.font(); f.setBold(True); item.setFont(f)
+                self._table.setItem(row_idx, col_idx, item)
+
+    def _on_double_click(self, row, _col):
+        if 0 <= row < len(self._results):
+            h = self._results[row]
+            self.navigate_requested.emit(h["fname"], h["sname"])
+
+
+# ?? Main window ???????????????????????????????????????????????????????????????
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -4354,7 +4565,7 @@ class MainWindow(QMainWindow):
         self._locked_sheet_cbs  = {}   # sname -> QCheckBox  (populated per file)
         self._demand_open_edits  = {}  # proc_key -> QLineEdit (HH:MM)
         self._demand_close_edits = {}  # proc_key -> QLineEdit (HH:MM)
-        self._spin_chars  = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+        self._spin_chars  = ["?","?","?","?","?","?","?","?","?","?"]
         self._spin_idx    = 0
         self._spin_timer  = QTimer(self)
         self._spin_timer.timeout.connect(self._tick_spinner)
@@ -4369,9 +4580,9 @@ class MainWindow(QMainWindow):
         self.file_cb.currentIndexChanged.connect(self._on_file)
         self.sheet_cb.currentIndexChanged.connect(self._on_sheet)
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
     # UI construction
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _build_ui(self):
         central = QWidget()
@@ -4385,16 +4596,16 @@ class MainWindow(QMainWindow):
         bold = QFont(); bold.setBold(True)
         def lbl(t): l=QLabel(t); l.setFont(bold); return l
 
-        # ── Folder browser ────────────────────────────────────────────────
-        self.browse_btn = QPushButton("📂  Browse for Folder…")
+        # ?? Folder browser ????????????????????????????????????????????????
+        self.browse_btn = QPushButton("?  Browse for Folder?")
         self.browse_btn.setFixedHeight(28)
         self.browse_btn.setToolTip(
             "Choose the root data folder.\n"
             "Expected layout:\n"
             "  <root>/\n"
-            "    └── <year>/\n"
-            "          └── <month>/\n"
-            "                └── *.xlsx")
+            "    ??? <year>/\n"
+            "          ??? <month>/\n"
+            "                ??? *.xlsx")
         self.browse_btn.setStyleSheet(
             "QPushButton { background:#1565c0; color:white; font-weight:bold; "
             "border-radius:4px; font-size:8pt; } "
@@ -4412,7 +4623,7 @@ class MainWindow(QMainWindow):
         self.file_cb = QComboBox(); ll.addWidget(self.file_cb)
         ll.addSpacing(2)
 
-        self.load_btn = QPushButton("⏵  Load File")
+        self.load_btn = QPushButton("?  Load File")
         self.load_btn.setFixedHeight(28)
         self.load_btn.clicked.connect(self._on_load_clicked)
         ll.addWidget(self.load_btn)
@@ -4475,8 +4686,8 @@ class MainWindow(QMainWindow):
         # Push everything below to the bottom
         ll.addStretch()
 
-        # ── Bottom action buttons ──────────────────────────────────────────────
-        self.export_btn = QPushButton("📤  Export to Excel…")
+        # ?? Bottom action buttons ??????????????????????????????????????????????
+        self.export_btn = QPushButton("?  Export to Excel?")
         self.export_btn.setFixedHeight(30)
         self.export_btn.setStyleSheet(
             "QPushButton { background:#43a047; color:white; font-weight:bold; "
@@ -4486,7 +4697,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.export_btn)
         ll.addSpacing(3)
 
-        self.reset_sheet_btn = QPushButton("↺  Reset This Sheet")
+        self.reset_sheet_btn = QPushButton("?  Reset This Sheet")
         self.reset_sheet_btn.setFixedHeight(26)
         self.reset_sheet_btn.setStyleSheet(
             "QPushButton { background:#29b6f6; color:white; font-weight:bold; "
@@ -4496,7 +4707,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.reset_sheet_btn)
         ll.addSpacing(3)
 
-        self.reset_btn = QPushButton("↺  Reset All to Original")
+        self.reset_btn = QPushButton("?  Reset All to Original")
         self.reset_btn.setFixedHeight(26)
         self.reset_btn.setStyleSheet(
             "QPushButton { background:#e57373; color:white; font-weight:bold; "
@@ -4504,6 +4715,19 @@ class MainWindow(QMainWindow):
             "QPushButton:disabled { background:#ef9a9a; }")
         self.reset_btn.clicked.connect(self._on_reset_all)
         ll.addWidget(self.reset_btn)
+        ll.addSpacing(4)
+
+        self.irma_lookup_btn = QPushButton("?  IRMA Farm Lookup?")
+        self.irma_lookup_btn.setFixedHeight(28)
+        self.irma_lookup_btn.setStyleSheet(
+            "QPushButton { background:#6a1b9a; color:white; font-weight:bold; "
+            "border-radius:4px; font-size:8pt; } "
+            "QPushButton:disabled { background:#ce93d8; }")
+        self.irma_lookup_btn.setToolTip(
+            "Find which routes contain a given farm IRMA number.\n"
+            "Searches all loaded files ? both original and solver-modified routes.")
+        self.irma_lookup_btn.clicked.connect(self._on_irma_lookup)
+        ll.addWidget(self.irma_lookup_btn)
         ll.addSpacing(4)
 
         root.addWidget(left)
@@ -4519,6 +4743,63 @@ class MainWindow(QMainWindow):
     def _build_route_tab(self, bold):
         route_tab = QWidget()
         rt = QVBoxLayout(route_tab); rt.setContentsMargins(0,0,0,0); rt.setSpacing(4)
+
+        # ?? IRMA Search bar ??????????????????????????????????????????????????
+        # Sits above both tables so it searches Original and Modified together.
+        search_frame = QFrame()
+        search_frame.setFrameShape(QFrame.StyledPanel)
+        search_frame.setMaximumHeight(36)
+        sl = QHBoxLayout(search_frame)
+        sl.setContentsMargins(6, 3, 6, 3); sl.setSpacing(6)
+
+        sl.addWidget(QLabel("?  IRMA Search:"))
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("e.g. 71-117  (Enter to search, Esc to clear)")
+        self._search_box.setFixedWidth(230)
+        self._search_box.setFont(QFont("Segoe UI", 9))
+        sl.addWidget(self._search_box)
+
+        self._search_prev_btn = QPushButton("? Prev")
+        self._search_next_btn = QPushButton("? Next")
+        self._search_clear_btn = QPushButton("? Clear")
+        for btn in (self._search_prev_btn, self._search_next_btn, self._search_clear_btn):
+            btn.setFixedHeight(24)
+            btn.setFixedWidth(64)
+            btn.setEnabled(False)
+        self._search_next_btn.setStyleSheet(
+            "QPushButton { background:#1565c0; color:white; font-weight:bold; "
+            "border-radius:3px; font-size:8pt; } "
+            "QPushButton:disabled { background:#90caf9; }")
+        self._search_prev_btn.setStyleSheet(
+            "QPushButton { background:#1565c0; color:white; font-weight:bold; "
+            "border-radius:3px; font-size:8pt; } "
+            "QPushButton:disabled { background:#90caf9; }")
+        self._search_clear_btn.setStyleSheet(
+            "QPushButton { background:#757575; color:white; font-weight:bold; "
+            "border-radius:3px; font-size:8pt; } "
+            "QPushButton:disabled { background:#bdbdbd; }")
+        sl.addWidget(self._search_prev_btn)
+        sl.addWidget(self._search_next_btn)
+        sl.addWidget(self._search_clear_btn)
+
+        self._search_status = QLabel("")
+        self._search_status.setFont(QFont("Segoe UI", 9))
+        self._search_status.setMinimumWidth(120)
+        sl.addWidget(self._search_status)
+        sl.addStretch()
+
+        self._search_box.returnPressed.connect(self._on_search)
+        self._search_box.textChanged.connect(self._on_search_text_changed)
+        self._search_next_btn.clicked.connect(self._on_search_next)
+        self._search_prev_btn.clicked.connect(self._on_search_prev)
+        self._search_clear_btn.clicked.connect(self._on_search_clear)
+        rt.addWidget(search_frame)
+
+        # Internal search state ? populated by _on_search()
+        # List of (table, visual_row) for every match, in top-to-bottom order
+        # across both tables (orig then edit).
+        self._search_hits   = []   # [(table_widget, row_index), ...]
+        self._search_cursor = -1   # index into _search_hits for current highlight
 
         top_split = QSplitter(Qt.Horizontal)
 
@@ -4558,9 +4839,9 @@ class MainWindow(QMainWindow):
         tl = QVBoxLayout(tray_frame); tl.setContentsMargins(4,4,4,4); tl.setSpacing(3)
         tray_hdr_row = QWidget()
         tray_hdr_l = QHBoxLayout(tray_hdr_row); tray_hdr_l.setContentsMargins(0,0,0,0); tray_hdr_l.setSpacing(6)
-        lbl_t = QLabel("Removed Farms & Processors  —  drag from Modified to remove  |  drag back to restore")
+        lbl_t = QLabel("Removed Farms & Processors  ?  drag from Modified to remove  |  drag back to restore")
         lbl_t.setFont(bold); tray_hdr_l.addWidget(lbl_t, stretch=1)
-        self._tray_del_btn = QPushButton("🗑  Delete Selected")
+        self._tray_del_btn = QPushButton("?  Delete Selected")
         self._tray_del_btn.setFixedHeight(24)
         self._tray_del_btn.setStyleSheet(
             "QPushButton { background:#e53935; color:white; font-weight:bold; "
@@ -4570,7 +4851,7 @@ class MainWindow(QMainWindow):
         self._tray_del_btn.clicked.connect(self._on_tray_delete)
         tray_hdr_l.addWidget(self._tray_del_btn)
 
-        self.add_block_btn = QPushButton("＋  Add Block")
+        self.add_block_btn = QPushButton("?  Add Block")
         self.add_block_btn.setFixedHeight(24)
         self.add_block_btn.setStyleSheet(
             "QPushButton { background:#7b1fa2; color:white; font-weight:bold; "
@@ -4586,7 +4867,7 @@ class MainWindow(QMainWindow):
         tl.addWidget(self.farm_tray)
         rt.addWidget(tray_frame, stretch=1)
 
-        # ── Manual Add bars (Farm + Processor) ─────────────────────────────
+        # ?? Manual Add bars (Farm + Processor) ?????????????????????????????
         add_frame = QFrame(); add_frame.setFrameShape(QFrame.StyledPanel)
         al = QVBoxLayout(add_frame); al.setContentsMargins(6,4,6,4); al.setSpacing(2)
 
@@ -4595,7 +4876,7 @@ class MainWindow(QMainWindow):
             w = QLineEdit(); w.setPlaceholderText(placeholder)
             w.setFont(field_font); w.setFixedWidth(width); return w
 
-        # ── Farm row ──────────────────────────────────────────────────────
+        # ?? Farm row ??????????????????????????????????????????????????????
         farm_hdr = QLabel("Add Farm to Tray"); farm_hdr.setFont(bold)
         al.addWidget(farm_hdr)
 
@@ -4632,7 +4913,7 @@ class MainWindow(QMainWindow):
         frl.addWidget(self._add_btn); frl.addStretch()
         al.addWidget(farm_row)
 
-        # ── Processor row ─────────────────────────────────────────────────
+        # ?? Processor row ?????????????????????????????????????????????????
         sep2 = QFrame(); sep2.setFrameShape(QFrame.HLine)
         sep2.setStyleSheet("color:#ddd; background:#ddd; max-height:1px;")
         al.addWidget(sep2)
@@ -4643,7 +4924,7 @@ class MainWindow(QMainWindow):
         proc_row = QWidget()
         prl = QHBoxLayout(proc_row); prl.setContentsMargins(0,0,0,0); prl.setSpacing(4)
 
-        # Editable combobox for proc key — populated from known processors in cache
+        # Editable combobox for proc key ? populated from known processors in cache
         self._add_proc_key = QComboBox()
         self._add_proc_key.setEditable(True)
         self._add_proc_key.setInsertPolicy(QComboBox.NoInsert)
@@ -4680,7 +4961,7 @@ class MainWindow(QMainWindow):
         comp_tab = QWidget()
         cl = QVBoxLayout(comp_tab); cl.setContentsMargins(8,8,8,8); cl.setSpacing(6)
 
-        hdr = QLabel("File-wide Original vs Modified — all loaded sheets")
+        hdr = QLabel("File-wide Original vs Modified ? all loaded sheets")
         hdr.setFont(bold); cl.addWidget(hdr)
 
         self._comp_tables = {}   # key -> QTableWidget
@@ -4689,8 +4970,8 @@ class MainWindow(QMainWindow):
         proc_split = QSplitter(Qt.Horizontal)
         for side in ("orig", "mod"):
             w = QWidget(); wl = QVBoxLayout(w); wl.setContentsMargins(0,0,0,0); wl.setSpacing(2)
-            lbl = QLabel("Original — Processor Volumes" if side=="orig"
-                         else "Modified — Processor Volumes"); lbl.setFont(bold)
+            lbl = QLabel("Original ? Processor Volumes" if side=="orig"
+                         else "Modified ? Processor Volumes"); lbl.setFont(bold)
             wl.addWidget(lbl)
             pt = QTableWidget(); self._init_comp_table(pt)
             self._comp_tables[f"proc_{side}"] = pt
@@ -4708,8 +4989,8 @@ class MainWindow(QMainWindow):
         sheet_split = QSplitter(Qt.Horizontal)
         for side in ("orig", "mod"):
             w = QWidget(); wl = QVBoxLayout(w); wl.setContentsMargins(0,0,0,0); wl.setSpacing(2)
-            lbl = QLabel("Original — Sheet Summary" if side=="orig"
-                         else "Modified — Sheet Summary"); lbl.setFont(bold)
+            lbl = QLabel("Original ? Sheet Summary" if side=="orig"
+                         else "Modified ? Sheet Summary"); lbl.setFont(bold)
             wl.addWidget(lbl)
             st = QTableWidget(); self._init_comp_table(st)
             self._comp_tables[f"sheet_{side}"] = st
@@ -4733,7 +5014,7 @@ class MainWindow(QMainWindow):
         sl.setContentsMargins(14, 10, 14, 10)
         sl.setSpacing(8)
 
-        # ── Title row ─────────────────────────────────────────────────────
+        # ?? Title row ?????????????????????????????????????????????????????
         title_row = QWidget()
         tr_l = QHBoxLayout(title_row); tr_l.setContentsMargins(0,0,0,0); tr_l.setSpacing(12)
         title = QLabel("ALNS Route Solver")
@@ -4749,7 +5030,7 @@ class MainWindow(QMainWindow):
         tr_l.addWidget(subtitle, stretch=1)
         sl.addWidget(title_row)
 
-        # ── helper ────────────────────────────────────────────────────────
+        # ?? helper ????????????????????????????????????????????????????????
         def spin_row(label_text, widget, unit=""):
             row = QWidget()
             rl  = QHBoxLayout(row)
@@ -4763,16 +5044,16 @@ class MainWindow(QMainWindow):
             rl.addStretch()
             return row
 
-        # ══════════════════════════════════════════════════════════════════
-        # TOP BAND — Objective Weights | Constraints | ALNS | Run controls
-        # ══════════════════════════════════════════════════════════════════
+        # ??????????????????????????????????????????????????????????????????
+        # TOP BAND ? Objective Weights | Constraints | ALNS | Run controls
+        # ??????????????????????????????????????????????????????????????????
         top_band = QWidget()
         top_l = QHBoxLayout(top_band)
         top_l.setContentsMargins(0, 0, 0, 0)
         top_l.setSpacing(10)
         top_l.setAlignment(Qt.AlignTop)
 
-        # ── Objective Weights ────────────────────────────────────────────
+        # ?? Objective Weights ????????????????????????????????????????????
         obj_box = QGroupBox("Objective Weights")
         obj_box.setFont(bold)
         obj_l = QVBoxLayout(obj_box)
@@ -4787,7 +5068,7 @@ class MainWindow(QMainWindow):
         self._sw_milking.setToolTip(
             "Multiplier on milking-window wait time (in km-equivalent).\n"
             "0 = ignore milking windows entirely.")
-        obj_l.addWidget(spin_row("Milking window ×", self._sw_milking))
+        obj_l.addWidget(spin_row("Milking window �", self._sw_milking))
 
         self._sw_plant_win_pen = QDoubleSpinBox()
         self._sw_plant_win_pen.setRange(0.0, 10000.0)
@@ -4796,7 +5077,7 @@ class MainWindow(QMainWindow):
         self._sw_plant_win_pen.setDecimals(0)
         self._sw_plant_win_pen.setToolTip(
             "Penalty per hour the truck must wait outside a plant's receiving window.\n"
-            "Expressed as km-equivalent — same scale as routing distance.\n"
+            "Expressed as km-equivalent ? same scale as routing distance.\n"
             "200 km/h: a 1-hour wait costs as much as driving 200 extra km.\n"
             "Set to 0 to ignore receiving windows entirely.")
         obj_l.addWidget(spin_row("Plant window pen", self._sw_plant_win_pen, "km/h wait"))
@@ -4827,7 +5108,7 @@ class MainWindow(QMainWindow):
         obj_l.addStretch()
         top_l.addWidget(obj_box)
 
-        # ── Constraints ───────────────────────────────────────────────────
+        # ?? Constraints ???????????????????????????????????????????????????
         con_box = QGroupBox("Constraints")
         con_box.setFont(bold)
         con_l = QVBoxLayout(con_box)
@@ -4841,8 +5122,8 @@ class MainWindow(QMainWindow):
         self._sw_vol_tol.setDecimals(2)
         self._sw_vol_tol.setToolTip(
             "Allowed deviation from original processor volume.\n"
-            "0.15 = ±15%.")
-        con_l.addWidget(spin_row("Plant vol tolerance ±", self._sw_vol_tol, "%*"))
+            "0.15 = �15%.")
+        con_l.addWidget(spin_row("Plant vol tolerance �", self._sw_vol_tol, "%*"))
 
         self._sw_vol_pen = QDoubleSpinBox()
         self._sw_vol_pen.setRange(0.0, 10000.0)
@@ -4902,7 +5183,7 @@ class MainWindow(QMainWindow):
         con_l.addStretch()
         top_l.addWidget(con_box)
 
-        # ── ALNS Parameters ───────────────────────────────────────────────
+        # ?? ALNS Parameters ???????????????????????????????????????????????
         alns_box = QGroupBox("ALNS Parameters")
         alns_box.setFont(bold)
         alns_l = QVBoxLayout(alns_box)
@@ -4915,7 +5196,7 @@ class MainWindow(QMainWindow):
         self._sw_iters.setValue(200)
         self._sw_iters.setToolTip(
             "Number of SA iterations per colour group.\n"
-            "α is auto-computed so T decays to the cooling target over this many steps.")
+            "? is auto-computed so T decays to the cooling target over this many steps.")
         alns_l.addWidget(spin_row("Iterations per colour", self._sw_iters))
 
         self._sw_cool = QDoubleSpinBox()
@@ -4924,11 +5205,11 @@ class MainWindow(QMainWindow):
         self._sw_cool.setValue(0.01)
         self._sw_cool.setDecimals(4)
         self._sw_cool.setToolTip(
-            "Target temperature as a fraction of T₀ at the final iteration.\n"
-            "0.10 = T stays at 10% of T₀ by the end — slow, exploratory cooling.\n"
-            "0.001 = T collapses to near-zero — fast convergence.\n"
-            "With T₀≈1,000 and 1,000 iters: 0.10 → T_final≈100, α≈0.9977.\n"
-            "α is auto-computed as  cool_target ^ (1 / iterations).")
+            "Target temperature as a fraction of T? at the final iteration.\n"
+            "0.10 = T stays at 10% of T? by the end ? slow, exploratory cooling.\n"
+            "0.001 = T collapses to near-zero ? fast convergence.\n"
+            "With T??1,000 and 1,000 iters: 0.10 ? T_final?100, ??0.9977.\n"
+            "? is auto-computed as  cool_target ^ (1 / iterations).")
         alns_l.addWidget(spin_row("Cooling target", self._sw_cool))
 
         self._sw_seed = QSpinBox()
@@ -4937,7 +5218,7 @@ class MainWindow(QMainWindow):
         self._sw_seed.setToolTip(
             "Random seed for the solver.\n"
             "0 = a fresh random seed each run (non-reproducible).\n"
-            "Any non-zero value makes the run fully reproducible — the same\n"
+            "Any non-zero value makes the run fully reproducible ? the same\n"
             "input, settings, and seed always produce the same result, which\n"
             "is useful for debugging and comparing parameter changes.")
         alns_l.addWidget(spin_row("Random seed (0=random)", self._sw_seed))
@@ -4945,14 +5226,14 @@ class MainWindow(QMainWindow):
         alns_l.addStretch()
         top_l.addWidget(alns_box)
 
-        # ── Run controls (buttons + progress + status + footnote) ─────────
+        # ?? Run controls (buttons + progress + status + footnote) ?????????
         run_box = QGroupBox("Run")
         run_box.setFont(bold)
         run_l = QVBoxLayout(run_box)
         run_l.setSpacing(6)
         run_l.setAlignment(Qt.AlignTop)
 
-        self._solve_btn = QPushButton("▶  Run Solver")
+        self._solve_btn = QPushButton("?  Run Solver")
         self._solve_btn.setFixedHeight(36)
         self._solve_btn.setStyleSheet(
             "QPushButton { background:#1e88e5; color:white; font-weight:bold; "
@@ -4961,7 +5242,7 @@ class MainWindow(QMainWindow):
         self._solve_btn.clicked.connect(self._on_solve_clicked)
         run_l.addWidget(self._solve_btn)
 
-        self._intra_btn = QPushButton("↺  Optimise Within Routes")
+        self._intra_btn = QPushButton("?  Optimise Within Routes")
         self._intra_btn.setFixedHeight(28)
         self._intra_btn.setStyleSheet(
             "QPushButton { background:#00897b; color:white; font-weight:bold; "
@@ -4970,11 +5251,11 @@ class MainWindow(QMainWindow):
         self._intra_btn.setToolTip(
             "Reorder farms within each route using 2-opt and or-opt until\n"
             "convergence. Applies directly to the Modified panel.\n"
-            "No cross-route moves — only within-route reordering.")
+            "No cross-route moves ? only within-route reordering.")
         self._intra_btn.clicked.connect(self._on_intra_route_apply)
         run_l.addWidget(self._intra_btn)
 
-        self._stop_btn = QPushButton("■  Stop")
+        self._stop_btn = QPushButton("?  Stop")
         self._stop_btn.setFixedHeight(36)
         self._stop_btn.setEnabled(False)
         self._stop_btn.setStyleSheet(
@@ -5023,12 +5304,12 @@ class MainWindow(QMainWindow):
 
         sl.addWidget(top_band)
 
-        # ══════════════════════════════════════════════════════════════════
-        # BOTTOM BAND — Processor Demand | Locked Sheets | Solver Log
-        # ══════════════════════════════════════════════════════════════════
+        # ??????????????????????????????????????????????????????????????????
+        # BOTTOM BAND ? Processor Demand | Locked Sheets | Solver Log
+        # ??????????????????????????????????????????????????????????????????
         bottom_split = QSplitter(Qt.Horizontal)
 
-        # ── Processor Demand targets (left) ───────────────────────────────
+        # ?? Processor Demand targets (left) ???????????????????????????????
         demand_box = QGroupBox("Processor Demand Targets & Receiving Windows")
         demand_box.setFont(bold)
         demand_l = QVBoxLayout(demand_box)
@@ -5064,19 +5345,19 @@ class MainWindow(QMainWindow):
         self._demand_open_edits   = {}
         self._demand_close_edits  = {}
 
-        refresh_btn = QPushButton("↺  Refresh from File")
+        refresh_btn = QPushButton("?  Refresh from File")
         refresh_btn.setFixedHeight(24)
         refresh_btn.clicked.connect(self._refresh_demand_targets)
         demand_l.addWidget(refresh_btn)
         bottom_split.addWidget(demand_box)
 
-        # ── Locked Sheets (centre) ────────────────────────────────────────
+        # ?? Locked Sheets (centre) ????????????????????????????????????????
         lock_box = QGroupBox("Locked Sheets")
         lock_box.setFont(bold)
         lock_l = QVBoxLayout(lock_box)
         lock_l.setSpacing(3)
         lock_note = QLabel(
-            "Checked sheets are held constant by the solver — their farm order\n"
+            "Checked sheets are held constant by the solver ? their farm order\n"
             "and processor assignments will not be changed.")
         lock_note.setWordWrap(True)
         lock_note.setStyleSheet("color:#777; font-size:8pt;")
@@ -5111,7 +5392,7 @@ class MainWindow(QMainWindow):
 
         bottom_split.addWidget(lock_box)
 
-        # ── Solver Log (right) ────────────────────────────────────────────
+        # ?? Solver Log (right) ????????????????????????????????????????????
         log_w = QWidget()
         log_l = QVBoxLayout(log_w)
         log_l.setContentsMargins(4, 0, 0, 0)
@@ -5126,9 +5407,9 @@ class MainWindow(QMainWindow):
         log_l.addWidget(self._solver_log)
         bottom_split.addWidget(log_w)
 
-        bottom_split.setStretchFactor(0, 1)   # demand — narrower
+        bottom_split.setStretchFactor(0, 1)   # demand ? narrower
         bottom_split.setStretchFactor(1, 1)   # locked sheets
-        bottom_split.setStretchFactor(2, 2)   # log — wider
+        bottom_split.setStretchFactor(2, 2)   # log ? wider
         bottom_split.setSizes([280, 180, 820])
         sl.addWidget(bottom_split, stretch=1)
 
@@ -5140,7 +5421,7 @@ class MainWindow(QMainWindow):
         self._solver_thread = None
         self._demand_spinboxes = {}   # initialised by _build_solver_tab
 
-    # ── Debug tab ─────────────────────────────────────────────────────────────
+    # ?? Debug tab ?????????????????????????????????????????????????????????????
 
     def _build_debug_tab(self, bold):
         """Raw data inspector: shows parsed blocks, timing results, and
@@ -5153,11 +5434,11 @@ class MainWindow(QMainWindow):
         # Header + refresh button
         hdr_row = QWidget()
         hrl = QHBoxLayout(hdr_row); hrl.setContentsMargins(0,0,0,0); hrl.setSpacing(8)
-        hdr_lbl = QLabel("Debug — Raw Block & Timing Data")
+        hdr_lbl = QLabel("Debug ? Raw Block & Timing Data")
         hdr_lbl.setFont(bold)
         hrl.addWidget(hdr_lbl, stretch=1)
 
-        refresh_btn = QPushButton("↺  Refresh")
+        refresh_btn = QPushButton("?  Refresh")
         refresh_btn.setFixedHeight(24)
         refresh_btn.setStyleSheet(
             "QPushButton { background:#546e7a; color:white; font-weight:bold; "
@@ -5165,7 +5446,7 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self._refresh_debug_tab)
         hrl.addWidget(refresh_btn)
 
-        copy_btn = QPushButton("📋  Copy")
+        copy_btn = QPushButton("?  Copy")
         copy_btn.setFixedHeight(24)
         copy_btn.setStyleSheet(
             "QPushButton { background:#37474f; color:white; font-weight:bold; "
@@ -5175,7 +5456,7 @@ class MainWindow(QMainWindow):
 
         dl.addWidget(hdr_row)
 
-        # ── Tools row — suppress milking ──────────────────────────────────────
+        # ?? Tools row ? suppress milking ??????????????????????????????????????
         tools_row = QWidget()
         trl = QHBoxLayout(tools_row); trl.setContentsMargins(0,0,0,0); trl.setSpacing(8)
 
@@ -5184,7 +5465,7 @@ class MainWindow(QMainWindow):
         self._suppress_no_milking_cb.setChecked(False)
         self._suppress_no_milking_cb.setToolTip(
             "When checked, farms 37-874, 14-247 and 92-545 have no milking-window\n"
-            "constraints — arrival times never cause waits and no conflict highlighting\n"
+            "constraints ? arrival times never cause waits and no conflict highlighting\n"
             "is shown for those farms.\n\n"
             "Uncheck to re-enable their windows (e.g. for verification).")
         self._suppress_no_milking_cb.stateChanged.connect(self._on_suppress_milking_changed)
@@ -5197,7 +5478,7 @@ class MainWindow(QMainWindow):
             "border-radius:3px; font-size:8pt; padding: 0 8px; }")
         plant_win_btn.setToolTip(
             "For every route in the Modified panel, show the plant window penalty\n"
-            "per processor destination — grouped by processor across all routes.")
+            "per processor destination ? grouped by processor across all routes.")
         plant_win_btn.clicked.connect(self._on_plant_window_report)
         trl.addWidget(plant_win_btn)
 
@@ -5271,7 +5552,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(debug_tab, "Debug")
 
     def _on_full_cost_report(self):
-        """Full cost breakdown for every route — uses same logic as solver via _sheet_cost_breakdown."""
+        """Full cost breakdown for every route ? uses same logic as solver via _sheet_cost_breakdown."""
         fname = self.file_cb.currentText()
         if not fname or fname not in self._cache:
             return
@@ -5317,7 +5598,7 @@ class MainWindow(QMainWindow):
                          f"  km={bd['km']:.1f}  milk={bd['milking']:.1f}"
                          f"  shift={bd['shift']:.1f}  ot={bd['overtime']:.1f}"
                          f"  cap={bd['cap']:.1f}  pw={bd['plant_win']:.1f}")
-            if not frozen:   # frozen routes are irreducible — exclude from grand total
+            if not frozen:   # frozen routes are irreducible ? exclude from grand total
                 for k in grand:
                     grand[k] += bd.get(k, 0.0)
 
@@ -5328,7 +5609,7 @@ class MainWindow(QMainWindow):
                      f"  total={grand['total']:.1f}")
         self._debug_text.setPlainText("\n".join(lines))
 
-    # ── Block-level capacity inspector ───────────────────────────────────────
+    # ?? Block-level capacity inspector ???????????????????????????????????????
     def _on_block_capacity_distribution(self):
         """For every non-preload block, compute its peak load (the same value
         the cap-penalty calculation uses) and report the distribution.
@@ -5341,7 +5622,7 @@ class MainWindow(QMainWindow):
           1. Summary stats (count, mean, median, stdev, min/max)
           2. Percentiles (50, 75, 80, 85, 90, 95, 99)
           3. Histogram in 1000 L buckets
-          4. Threshold sensitivity table (38k → 45k, # blocks violating + L over)
+          4. Threshold sensitivity table (38k ? 45k, # blocks violating + L over)
           5. Top heaviest blocks (route, block index, peak)
           6. Per-route summary (max block load, # blocks, # over current cap)
 
@@ -5429,7 +5710,7 @@ class MainWindow(QMainWindow):
 
         if not blocks_data:
             self._debug_text.setPlainText(
-                "(no blocks to analyse — load a file with Modified panel data)")
+                "(no blocks to analyse ? load a file with Modified panel data)")
             return
 
         peaks = [b["peak"] for b in blocks_data]
@@ -5448,9 +5729,9 @@ class MainWindow(QMainWindow):
             frac = k - lo
             return xs_sorted[lo] * (1 - frac) + xs_sorted[hi] * frac
 
-        # ── Build report ─────────────────────────────────────────────────────
+        # ?? Build report ?????????????????????????????????????????????????????
         lines = []
-        lines.append("Block Capacity Distribution — Modified panel")
+        lines.append("Block Capacity Distribution ? Modified panel")
         lines.append("=" * 78)
         lines.append(f"File: {fname}")
         lines.append(f"Current hard_vol_cap setting: {current_cap:,.0f} L  (cap_penalty = {self._sw_cap_pen.value()}/L)")
@@ -5462,9 +5743,9 @@ class MainWindow(QMainWindow):
         stdev  = statistics.stdev(peaks) if n > 1 else 0.0
         var    = statistics.variance(peaks) if n > 1 else 0.0
         lines.append("")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append("SUMMARY STATISTICS (peak load per block, litres)")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append(f"  count:    {n}")
         lines.append(f"  mean:     {mean:>10,.0f}")
         lines.append(f"  median:   {median:>10,.0f}")
@@ -5476,17 +5757,17 @@ class MainWindow(QMainWindow):
 
         # 2. Percentiles
         lines.append("")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append("PERCENTILES")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         for p in (10, 25, 50, 75, 80, 85, 90, 95, 97, 99):
             lines.append(f"  P{p:<2}: {pct(peaks_sorted, p):>10,.0f} L")
 
         # 3. Histogram in 1000 L buckets
         lines.append("")
-        lines.append("─" * 78)
-        lines.append("DISTRIBUTION HISTOGRAM (1000 L buckets, ░=1 block, current cap marked)")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
+        lines.append("DISTRIBUTION HISTOGRAM (1000 L buckets, ?=1 block, current cap marked)")
+        lines.append("?" * 78)
         if peaks:
             bucket_size = 1000
             lo_bucket = (int(min(peaks)) // bucket_size) * bucket_size
@@ -5500,17 +5781,17 @@ class MainWindow(QMainWindow):
             for b in range(lo_bucket, hi_bucket + bucket_size, bucket_size):
                 count = buckets.get(b, 0)
                 bar_len = count // bar_scale + (1 if count > 0 else 0)
-                bar = "█" * bar_len
-                cap_marker = "  ← cap" if b <= current_cap < b + bucket_size else ""
-                lines.append(f"  {b:>6,} – {b + bucket_size - 1:>6,}  ({count:>3})  {bar}{cap_marker}")
+                bar = "?" * bar_len
+                cap_marker = "  ? cap" if b <= current_cap < b + bucket_size else ""
+                lines.append(f"  {b:>6,} ? {b + bucket_size - 1:>6,}  ({count:>3})  {bar}{cap_marker}")
             if bar_scale > 1:
-                lines.append(f"  (each █ ≈ {bar_scale} blocks)")
+                lines.append(f"  (each ? ? {bar_scale} blocks)")
 
         # 4. Threshold sensitivity
         lines.append("")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append("THRESHOLD SENSITIVITY  (if hard_vol_cap = T, what penalty results?)")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append(f"  {'Threshold':>10}  {'#Over':>6}  {'%Over':>6}  {'L over':>10}  {'Penalty $':>12}  {'Worst block':>12}")
         cap_rate = self._sw_cap_pen.value()
         for T in (38000, 39000, 40000, 41000, 41500, 42000, 42500, 43000, 44000, 45000):
@@ -5519,14 +5800,14 @@ class MainWindow(QMainWindow):
             l_over = sum(p - T for p in over)
             penalty = l_over * cap_rate
             worst = max(over) - T if over else 0
-            mark = "  ← current" if abs(T - current_cap) < 0.5 else ""
+            mark = "  ? current" if abs(T - current_cap) < 0.5 else ""
             lines.append(f"  {T:>10,}  {n_over:>6}  {(100.0*n_over/n):>5.1f}%  {l_over:>10,.0f}  {penalty:>12,.0f}  {worst:>12,.0f}{mark}")
 
         # 5. Top heaviest blocks
         lines.append("")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append("TOP 20 HEAVIEST BLOCKS")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append(f"  {'Rank':>4}  {'Sheet':>10}  {'Block':>5}  {'Kind':>6}  {'Farms':>5}  {'Dests':>5}  {'Total fv':>10}  {'Peak':>10}  {'vs cap':>10}")
         top = sorted(blocks_data, key=lambda b: -b["peak"])[:20]
         for i, b in enumerate(top, 1):
@@ -5534,11 +5815,11 @@ class MainWindow(QMainWindow):
             delta_str = f"+{delta:,.0f}" if delta > 0 else f"{delta:,.0f}"
             lines.append(f"  {i:>4}  {b['sheet']:>10}  {b['b_idx']:>5}  {b['kind']:>6}  {b['n_farms']:>5}  {b['n_dests']:>5}  {b['total_fv']:>10,.0f}  {b['peak']:>10,.0f}  {delta_str:>10}")
 
-        # 6. Per-route summary  — sheets sorted by max block descending
+        # 6. Per-route summary  ? sheets sorted by max block descending
         lines.append("")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append("PER-ROUTE SUMMARY (sheets with at least one block over current cap)")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         per_sheet = {}
         for b in blocks_data:
             s = b["sheet"]
@@ -5559,9 +5840,9 @@ class MainWindow(QMainWindow):
 
         # 7. Diagnostic: solver gaming check
         lines.append("")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         lines.append("GAMING DIAGNOSTIC")
-        lines.append("─" * 78)
+        lines.append("?" * 78)
         # Count blocks within 200L below the current cap.  If the solver is gaming
         # the threshold, you'll see a noticeable spike here.
         near_under = [p for p in peaks if current_cap - 200 < p <= current_cap]
@@ -5574,10 +5855,10 @@ class MainWindow(QMainWindow):
             ratio = len(in_500_under) / max(1, len(in_500_over))
             lines.append(f"  Ratio (under:over) within 500L of cap: {ratio:.2f}")
             if ratio > 4.0 and len(in_500_under) >= 3:
-                lines.append("  ⚠ Sharp asymmetry — investigate whether solver is piling loads")
+                lines.append("  ? Sharp asymmetry ? investigate whether solver is piling loads")
                 lines.append("    against the threshold rather than spreading them.")
             elif ratio < 1.5:
-                lines.append("  ✓ Loads are spread naturally around the threshold.")
+                lines.append("  ? Loads are spread naturally around the threshold.")
             else:
                 lines.append("  Loads moderately clustered below threshold (normal).")
         # Also report std-dev of just the over-cap blocks vs all blocks
@@ -5697,9 +5978,9 @@ class MainWindow(QMainWindow):
             if abs(delta_km) > 0.1 or abs(delta_h) > 0.01:
                 n_improved += 1
                 lines.append(
-                    f"  {sname}  km:{km_b:.1f}→{km_a:.1f}({delta_km:+.1f})"
-                    f"  hours:{h_b:.2f}→{h_a:.2f}({delta_h:+.2f})"
-                    f"  ot:{ot_b:.1f}→{ot_a:.1f}")
+                    f"  {sname}  km:{km_b:.1f}?{km_a:.1f}({delta_km:+.1f})"
+                    f"  hours:{h_b:.2f}?{h_a:.2f}({delta_h:+.2f})"
+                    f"  ot:{ot_b:.1f}?{ot_a:.1f}")
 
         delta_km_total = total_km_after - total_km_before
         delta_h_total  = total_h_after  - total_h_before
@@ -5708,10 +5989,10 @@ class MainWindow(QMainWindow):
         lines.append(f"\n{'='*70}")
         lines.append(f"Routes improved: {n_improved}")
         lines.append(
-            f"TOTAL km:    {total_km_before:.1f} → {total_km_after:.1f}"
+            f"TOTAL km:    {total_km_before:.1f} ? {total_km_after:.1f}"
             f"  ({delta_km_total:+.1f},  {pct_km:+.2f}%)")
         lines.append(
-            f"TOTAL hours: {total_h_before:.2f} → {total_h_after:.2f}"
+            f"TOTAL hours: {total_h_before:.2f} ? {total_h_after:.2f}"
             f"  ({delta_h_total:+.2f}h,  {pct_h:+.2f}%)")
         self._debug_text.setPlainText("\n".join(lines))
 
@@ -5741,7 +6022,7 @@ class MainWindow(QMainWindow):
         }
         max_sh  = cfg["max_shift_h"]
         suppress = cfg["suppress_no_milking"]
-        lines = ["Overtime Timeline — Modified panel", "=" * 70]
+        lines = ["Overtime Timeline ? Modified panel", "=" * 70]
         n_overtime = 0
 
         for sname in sorted(self._cache[fname].keys()):
@@ -5759,7 +6040,7 @@ class MainWindow(QMainWindow):
             base_dt = datetime.combine(date.today(), start_time)
             shift_h = (end_dt - base_dt).total_seconds() / 3600.0
             if shift_h <= max_sh:
-                continue   # no overtime — skip
+                continue   # no overtime ? skip
 
             n_overtime += 1
             overtime_h = shift_h - max_sh
@@ -5921,7 +6202,7 @@ class MainWindow(QMainWindow):
                     open_str, close_str = window
 
                     pen    = 0.0
-                    status = "✓ in window"
+                    status = "? in window"
                     if not time_in_window(arr, open_str, close_str):
                         open_t = parse_hhmm(open_str)
                         if open_t:
@@ -5945,7 +6226,7 @@ class MainWindow(QMainWindow):
                                 status = f"margin  {mins_to_close:.0f}m to close  pen={pen:.1f}"
                     dest_report[dk].append((sname, b_idx+1, arr_s, pen, status))
 
-        lines       = ["Plant Window Cost Report — Modified panel", "=" * 60]
+        lines       = ["Plant Window Cost Report ? Modified panel", "=" * 60]
         grand_total = 0.0
         for dk in sorted(dest_report.keys()):
             entries    = dest_report[dk]
@@ -6010,7 +6291,7 @@ class MainWindow(QMainWindow):
             lines.append(f"Shift end: {fmt_hhmm(end_cursor.time())}   "
                          f"Duration: {h}h {m:02d}m")
         lines.append("")
-        lines.append("─" * 72)
+        lines.append("?" * 72)
 
         for b_idx, block in enumerate(blocks):
             dists = all_dists[b_idx] if b_idx < len(all_dists) else []
@@ -6037,14 +6318,14 @@ class MainWindow(QMainWindow):
             for i, farm in enumerate(farms):
                 irma = farm.get("irma","?")
                 vol  = farm.get("prior_vol")
-                vol_s = f"{int(vol):,}L" if isinstance(vol, (int,float)) else "—"
+                vol_s = f"{int(vol):,}L" if isinstance(vol, (int,float)) else "?"
                 ft = btimes[i+1] if (btimes and i+1 < len(btimes)) else None
                 arr_s = fmt_hhmm(ft["arr"] if ft else None)
                 dep_s = fmt_hhmm(ft["dep"] if ft else None)
                 wait  = ft["wait"] if ft else None
                 wait_s = f"  wait={int(round(wait))}m" if wait else ""
-                dist_s = f"{dists[i]:.1f}km" if i < len(dists) and dists[i] is not None else "—km"
-                dur_s  = f"{durs[i]:.0f}m"   if i < len(durs)  and durs[i]  is not None else "—m"
+                dist_s = f"{dists[i]:.1f}km" if i < len(dists) and dists[i] is not None else "?km"
+                dur_s  = f"{durs[i]:.0f}m"   if i < len(durs)  and durs[i]  is not None else "?m"
                 # Three windows
                 w3data = THREE_WINDOW_FARMS.get(irma)
                 w3_s   = f"  w3={w3data['w3'][0]}-{w3data['w3'][1]}" if w3data else ""
@@ -6066,8 +6347,8 @@ class MainWindow(QMainWindow):
                 vp_s  = f"{int(vp):,}L partial" if isinstance(vp,(int,float)) else "rest"
                 dist_v = dists[stop_idx-1] if stop_idx-1 < len(dists) and dists[stop_idx-1] is not None else None
                 dur_v  = durs[stop_idx-1]  if stop_idx-1 < len(durs)  and durs[stop_idx-1]  is not None else None
-                dist_s = f"{dist_v:.1f}km" if dist_v is not None else "—km"
-                dur_s  = f"{dur_v:.0f}m"   if dur_v  is not None else "—m"
+                dist_s = f"{dist_v:.1f}km" if dist_v is not None else "?km"
+                dur_s  = f"{dur_v:.0f}m"   if dur_v  is not None else "?m"
                 is_yard = "yard for" in (dest_d.get("name","") or "").lower()
                 tag2   = " [YARD]" if is_yard else ""
                 lines.append(
@@ -6090,7 +6371,7 @@ class MainWindow(QMainWindow):
 
         self._debug_text.setPlainText("\n".join(lines))
         self._debug_info.setText(
-            f"Sheet {sname} — {len(blocks)} block(s), {total_farms} farm(s)  "
+            f"Sheet {sname} ? {len(blocks)} block(s), {total_farms} farm(s)  "
             f"| dm keys: {len(self.dm)}  dur keys: {len(self.dm_dur)}"
         )
 
@@ -6100,8 +6381,8 @@ class MainWindow(QMainWindow):
 
     def _on_route_opt_changed(self, state):
         """Single handler for the combined route-corrections checkbox.
-        Check  → split optimization then auto-flag, snapshot into _corrected_blocks.
-        Uncheck → clear _corrected_blocks and fully revert _sheet_mods to raw originals."""
+        Check  ? split optimization then auto-flag, snapshot into _corrected_blocks.
+        Uncheck ? clear _corrected_blocks and fully revert _sheet_mods to raw originals."""
         fname = self.file_cb.currentText()
         if self._chk_route_opt.isChecked():
             self._optimize_all_split_positions()
@@ -6112,7 +6393,7 @@ class MainWindow(QMainWindow):
             if self.tabs.currentIndex() == 1:
                 self._refresh_comparison()
         else:
-            # Full revert — clear both stores
+            # Full revert ? clear both stores
             if fname and fname in self._cache:
                 keys = [k for k in self._sheet_mods if k[0] == fname]
                 for k in keys:
@@ -6166,7 +6447,7 @@ class MainWindow(QMainWindow):
         if self.tabs.currentIndex() == 1:
             self._refresh_comparison()
 
-    # ── Processor demand helpers ─────────────────────────────────────────────
+    # ?? Processor demand helpers ?????????????????????????????????????????????
 
     def _refresh_demand_targets(self):
         """Populate/refresh processor demand spinboxes and receiving-window fields
@@ -6280,7 +6561,7 @@ class MainWindow(QMainWindow):
         included.  A processor with blank open AND blank close is treated as
         24/7 and omitted (no penalty applied).
         """
-        # We need the key→name reverse map to translate display names back to keys
+        # We need the key?name reverse map to translate display names back to keys
         fname = self.file_cb.currentText()
         proc_key_map = {}   # display_name -> dest_key
         if fname and fname in self._cache:
@@ -6339,7 +6620,7 @@ class MainWindow(QMainWindow):
                 continue
             dc = entry.get("day_colour", "")
             bucket = _sheet_colour_bucket(dc)
-            # Only show RED/BLUE sheets — solver doesn't touch OTHER anyway
+            # Only show RED/BLUE sheets ? solver doesn't touch OTHER anyway
             if bucket not in ("RED", "BLUE"):
                 continue
 
@@ -6358,7 +6639,7 @@ class MainWindow(QMainWindow):
             self._lock_layout.addWidget(cb)
             self._locked_sheet_cbs[sname] = cb
 
-    # ── Excel export ──────────────────────────────────────────────────────────
+    # ?? Excel export ??????????????????????????????????????????????????????????
 
     def _on_export_excel(self):
         fname = self.file_cb.currentText()
@@ -6395,12 +6676,12 @@ class MainWindow(QMainWindow):
             if key not in self._sheet_mods: continue
             mod_blocks = self._sheet_mods[key]
 
-            # ── Collect modified farm rows in sheet order ──────────────────
+            # ?? Collect modified farm rows in sheet order ??????????????????
             mod_rows = []
             for block in mod_blocks:
                 mod_rows.extend(block["rows"])
 
-            # ── Find original IRMA data row numbers ────────────────────────
+            # ?? Find original IRMA data row numbers ????????????????????????
             irma_ws_rows = []
             for row in ws.iter_rows():
                 r    = row[0].row
@@ -6412,9 +6693,9 @@ class MainWindow(QMainWindow):
                 continue
 
             # Columns that carry per-farm data: the named ones plus any extra
-            # columns captured at parse time (farm name, street address, …).
+            # columns captured at parse time (farm name, street address, ?).
             # Including the extras in the write/unmerge set makes the *whole*
-            # farm row travel when the solver swaps farms — without this, a
+            # farm row travel when the solver swaps farms ? without this, a
             # farm's name and address stay behind and end up next to a different
             # farm's IRMA.
             extra_cols_in_use = set()
@@ -6422,7 +6703,7 @@ class MainWindow(QMainWindow):
                 extra_cols_in_use.update((fd.get("_extra_cells") or {}).keys())
             sheet_write_cols = WRITE_COLS | extra_cols_in_use
 
-            # ── Unmerge any merged ranges that overlap our target rows/cols ─
+            # ?? Unmerge any merged ranges that overlap our target rows/cols ?
             # Build set of (row, col) tuples we intend to write so we can
             # identify which merges to temporarily dissolve.
             target_cells = set()
@@ -6448,7 +6729,7 @@ class MainWindow(QMainWindow):
                     start_row=min_r, start_column=min_c,
                     end_row=max_r,   end_column=max_c)
 
-            # ── Write farm data ────────────────────────────────────────────
+            # ?? Write farm data ????????????????????????????????????????????
             def _write_cell(ws_row, col, value):
                 ws.cell(ws_row, col).value = value
 
@@ -6475,7 +6756,7 @@ class MainWindow(QMainWindow):
                     for col in sheet_write_cols:
                         _write_cell(ws_row, col, None)
 
-            # ── Write dest rows back (delivery information section) ────────
+            # ?? Write dest rows back (delivery information section) ????????
             # Find all numbered delivery rows in this sheet and update volumes
             DEST_WRITE_COLS = {C_DEST_VOL, C_DEST_NAME, C_DEST_KEY}
             dest_target = set()
@@ -6531,7 +6812,7 @@ class MainWindow(QMainWindow):
                 ws.merge_cells(start_row=min_r,start_column=min_c,
                                end_row=max_r,end_column=max_c)
 
-            # ── Re-merge ───────────────────────────────────────────────────
+            # ?? Re-merge ???????????????????????????????????????????????????
             for (min_r, min_c, max_r, max_c) in merges_to_redo:
                 ws.merge_cells(
                     start_row=min_r, start_column=min_c,
@@ -6569,7 +6850,7 @@ class MainWindow(QMainWindow):
         self._intra_thread.start()
 
     def _on_intra_progress(self, cur, total, status):
-        self._intra_btn.setText(f"Optimising… {cur}/{total}")
+        self._intra_btn.setText(f"Optimising? {cur}/{total}")
         self._solver_status.setText(status)
         if total > 0:
             self._solver_progress.setMaximum(total)
@@ -6583,12 +6864,12 @@ class MainWindow(QMainWindow):
         self._intra_btn.setText("Optimise Within Routes")
         self._solve_btn.setEnabled(True)
         self._solver_progress.setValue(self._solver_progress.maximum())
-        self._solver_status.setText(f"Done — {len(results)} route(s) improved")
+        self._solver_status.setText(f"Done ? {len(results)} route(s) improved")
         self._display_sheet()
         if self.tabs.currentIndex() == 1:
             self._refresh_comparison()
 
-    # ── Solver event handlers ─────────────────────────────────────────────────
+    # ?? Solver event handlers ?????????????????????????????????????????????????
 
     def _on_solve_clicked(self):
         fname = self.file_cb.currentText()
@@ -6642,7 +6923,7 @@ class MainWindow(QMainWindow):
 
         locked_list = sorted(locked_sheets - SOLVER_SKIP_SHEETS)
         win_lines   = "\n".join(
-            f"    {dk}: {v[0]}–{v[1]}" for dk, v in sorted(plant_windows.items())
+            f"    {dk}: {v[0]}?{v[1]}" for dk, v in sorted(plant_windows.items())
         ) or "    (none active)"
 
         self._solver_log.append(
@@ -6651,21 +6932,21 @@ class MainWindow(QMainWindow):
             f"  BLUE sheets:    {n_blue}\n"
             f"  Locked sheets:  {locked_list or '(none)'}\n"
             f"  Iterations:     {cfg['iterations']} per group\n"
-            f"  Vol tol:        ±{cfg['vol_tol']*100:.0f}%\n"
+            f"  Vol tol:        �{cfg['vol_tol']*100:.0f}%\n"
             f"  Truck cap:      {cfg['hard_vol_cap']:,} L  (pen {cfg['cap_penalty']:.0f}/L)\n"
             f"  Max shift:      {cfg['max_shift_h']:.1f} h\n"
             f"  Shift hrs wt:   {cfg['shift_hours_weight']:.1f}/h\n"
-            f"  Milking wt:     {cfg['milking_weight']:.1f}×\n"
+            f"  Milking wt:     {cfg['milking_weight']:.1f}�\n"
             f"  Plant win pen:  {cfg['plant_win_penalty']:.0f} km/h wait  "
             f"margin={cfg['plant_win_margin_mins']:.0f}min @ {cfg['plant_win_margin_rate']:.0f} km/h\n"
             f"  Plant windows:\n{win_lines}\n"
-            f"  Cooling target: {tcf*100:.2f}% of T₀\n"
-            f"  α (per iter):   {alpha_display:.6f}\n"
+            f"  Cooling target: {tcf*100:.2f}% of T?\n"
+            f"  ? (per iter):   {alpha_display:.6f}\n"
         )
 
         self._solve_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        self._solver_status.setText("Running…")
+        self._solver_status.setText("Running?")
 
         self._solver_thread = ALNSSolver(fname, self._cache, self.dm, cfg,
                                          sheet_mods=self._sheet_mods,
@@ -6678,7 +6959,7 @@ class MainWindow(QMainWindow):
     def _on_stop_solver(self):
         if self._solver_thread and self._solver_thread.isRunning():
             self._solver_thread.stop()
-            self._solver_status.setText("Stopping…")
+            self._solver_status.setText("Stopping?")
 
     def _on_solver_progress(self, cur, total, msg):
         self._solver_progress.setMaximum(total)
@@ -6703,7 +6984,7 @@ class MainWindow(QMainWindow):
         # so a farm that ends up in sheet X may have originally come from sheet Y.
         # Looking only at sheet X's orig_blocks would miss its _uid entirely and
         # leave _orig_arr unset, causing phantom milking waits.
-        global_uid_map = {}   # uid → (was_checked, orig_arr_time)
+        global_uid_map = {}   # uid ? (was_checked, orig_arr_time)
         file_cache = self._cache.get(fname, {})
         for sname_c, entry_c in file_cache.items():
             if not isinstance(entry_c, dict):
@@ -6738,8 +7019,8 @@ class MainWindow(QMainWindow):
             n_updated += 1
 
         self._solver_log.append(
-            f"\n✓ Done — {n_updated} sheets updated in Modified panel.")
-        self._solver_status.setText(f"✓ Complete — {n_updated} sheets updated")
+            f"\n? Done ? {n_updated} sheets updated in Modified panel.")
+        self._solver_status.setText(f"? Complete ? {n_updated} sheets updated")
         self._solver_progress.setValue(self._solver_progress.maximum())
 
         # Refresh currently displayed sheet if it was touched
@@ -6781,9 +7062,9 @@ class MainWindow(QMainWindow):
         t.setFont(QFont("Segoe UI", 9))
         t.setAlternatingRowColors(True)
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
     # Spinner
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _start_spinner(self, msg):
         self._spin_msg = msg; self._spin_idx = 0
@@ -6797,9 +7078,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{ch}  {self._spin_msg}")
         self._spin_idx += 1
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
     # Folder scanning / dropdown population
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _year_folders(self):
         result = {}
@@ -6842,7 +7123,7 @@ class MainWindow(QMainWindow):
         # If no year folders were found, warn the user
         if not self._year_map:
             self.statusBar().showMessage(
-                f"⚠  No year sub-folders found in '{chosen}'. "
+                f"?  No year sub-folders found in '{chosen}'. "
                 "Expected: <root>/<year>/<month>/<file>.xlsx")
 
     def _scan_folders(self):
@@ -6891,15 +7172,199 @@ class MainWindow(QMainWindow):
             if idx >= 0: self.sheet_cb.setCurrentIndex(idx)
         self._block_sigs(False)
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
+    # IRMA Search
+    # ?????????????????????????????????????????????????????????????????????????
+
+    # Highlight colours used for search results
+    _SEARCH_HIT_BG    = QColor("#fff176")   # yellow  ? every match
+    _SEARCH_CURSOR_BG = QColor("#f57f17")   # amber   ? the currently-navigated match
+
+    def _on_search_text_changed(self):
+        """Clear highlights as soon as the user edits the query so stale
+        results don't linger.  Don't re-search on every keypress ? wait for
+        Enter so partial IRMA numbers (e.g. typing '71') don't scroll the
+        table around while the user is still typing."""
+        if not self._search_box.text().strip():
+            self._on_search_clear()
+
+    def _on_search(self):
+        """Run the search: find every farm row whose IRMA matches the query
+        (case-insensitive substring) in both the Original and Modified tables,
+        highlight them all, and scroll to the first hit."""
+        query = self._search_box.text().strip().upper()
+        self._search_clear_highlights()
+        self._search_hits   = []
+        self._search_cursor = -1
+
+        if not query:
+            self._search_status.setText("")
+            for btn in (self._search_prev_btn, self._search_next_btn,
+                        self._search_clear_btn):
+                btn.setEnabled(False)
+            return
+
+        irma_col = next((i for i, (_, k) in enumerate(COLS) if k == "irma"), 0)
+
+        for table in (self.orig_table, self.edit_table):
+            for row in range(table.rowCount()):
+                item = table.item(row, irma_col)
+                if item is None:
+                    continue
+                # Only match real farm rows (they carry UserRole farm data)
+                if item.data(Qt.UserRole) is None:
+                    continue
+                if query in item.text().upper():
+                    self._search_hits.append((table, row))
+                    # Apply hit highlight to every cell in this row
+                    for col in range(table.columnCount()):
+                        ci = table.item(row, col)
+                        if ci is not None:
+                            ci.setBackground(self._SEARCH_HIT_BG)
+
+        n = len(self._search_hits)
+        if n == 0:
+            self._search_status.setText("No match")
+            self._search_status.setStyleSheet("color: #c62828; font-weight: bold;")
+            for btn in (self._search_prev_btn, self._search_next_btn):
+                btn.setEnabled(False)
+            self._search_clear_btn.setEnabled(True)
+            return
+
+        self._search_status.setStyleSheet("")
+        for btn in (self._search_prev_btn, self._search_next_btn,
+                    self._search_clear_btn):
+            btn.setEnabled(True)
+
+        # Jump to first hit
+        self._search_cursor = 0
+        self._search_apply_cursor()
+
+    def _on_search_next(self):
+        if not self._search_hits:
+            return
+        self._search_cursor = (self._search_cursor + 1) % len(self._search_hits)
+        self._search_apply_cursor()
+
+    def _on_search_prev(self):
+        if not self._search_hits:
+            return
+        self._search_cursor = (self._search_cursor - 1) % len(self._search_hits)
+        self._search_apply_cursor()
+
+    def _search_apply_cursor(self):
+        """Update the status label, re-colour all hits (current one gets
+        a stronger amber), and scroll the relevant table to show it."""
+        irma_col = next((i for i, (_, k) in enumerate(COLS) if k == "irma"), 0)
+        n = len(self._search_hits)
+
+        for idx, (table, row) in enumerate(self._search_hits):
+            bg = self._SEARCH_CURSOR_BG if idx == self._search_cursor \
+                 else self._SEARCH_HIT_BG
+            for col in range(table.columnCount()):
+                ci = table.item(row, col)
+                if ci is not None:
+                    ci.setBackground(bg)
+
+        cur_table, cur_row = self._search_hits[self._search_cursor]
+        cur_table.scrollToItem(cur_table.item(cur_row, irma_col),
+                               QAbstractItemView.PositionAtCenter)
+        cur_table.setCurrentCell(cur_row, irma_col)
+
+        # Count hits per table for the label e.g. "3 / 5  (Orig: 2  Mod: 3)"
+        orig_hits = sum(1 for t, _ in self._search_hits if t is self.orig_table)
+        mod_hits  = sum(1 for t, _ in self._search_hits if t is self.edit_table)
+        label     = f"{self._search_cursor + 1} / {n}"
+        if orig_hits and mod_hits:
+            label += f"  (Orig: {orig_hits}  Mod: {mod_hits})"
+        elif orig_hits:
+            label += "  (Original only)"
+        elif mod_hits:
+            label += "  (Modified only)"
+        self._search_status.setText(label)
+
+    def _search_clear_highlights(self):
+        """Remove search highlight colours from all previously-highlighted rows.
+        Called before a new search and on clear so the table returns to its
+        normal row colours."""
+        irma_col = next((i for i, (_, k) in enumerate(COLS) if k == "irma"), 0)
+        for table, row in self._search_hits:
+            # Re-read the natural background from the IRMA cell's current data
+            # so we don't have to recompute the full row colour.  The IRMA cell
+            # background was set by populate_table and doesn't need to be exact;
+            # clearing to white is acceptable ? the next _display_sheet call
+            # will restore proper colours anyway.  For a cleaner restore we
+            # delegate back to populate_table by triggering _display_sheet,
+            # but that's expensive.  Instead, restore to the standard alternating
+            # block colour based on whether the b_idx stored in UserRole is even/odd.
+            item = table.item(row, irma_col)
+            if item is None:
+                continue
+            farm_data = item.data(Qt.UserRole)
+            if isinstance(farm_data, tuple) and len(farm_data) >= 1:
+                b_idx = farm_data[0]
+                natural_bg = QColor("#e3f2fd") if b_idx % 2 == 0 else QColor("#ffffff")
+            else:
+                natural_bg = QColor("#ffffff")
+            for col in range(table.columnCount()):
+                ci = table.item(row, col)
+                if ci is not None:
+                    ci.setBackground(natural_bg)
+
+    def _on_search_clear(self):
+        """Clear the search box, remove highlights, and reset state."""
+        self._search_clear_highlights()
+        self._search_hits   = []
+        self._search_cursor = -1
+        self._search_box.clear()
+        self._search_status.setText("")
+        self._search_status.setStyleSheet("")
+        for btn in (self._search_prev_btn, self._search_next_btn,
+                    self._search_clear_btn):
+            btn.setEnabled(False)
+
+    def _on_irma_lookup(self):
+        """Open the IRMA Farm Lookup dialog against all currently loaded data."""
+        dlg = IRMALookupDialog(self._cache, self._sheet_mods, parent=self)
+        dlg.navigate_requested.connect(self._navigate_to_sheet)
+        # Pre-fill with the search box text if the user already has one there
+        if hasattr(self, "_search_box") and self._search_box.text().strip():
+            dlg._query.setText(self._search_box.text().strip())
+            dlg._run_search()
+        dlg.exec_()
+
+    def _navigate_to_sheet(self, fname, sname):
+        """Navigate the main window to the given file and sheet.
+        Called from IRMALookupDialog when the user double-clicks a result."""
+        # Select the file in the file combo
+        fidx = self.file_cb.findText(fname)
+        if fidx < 0:
+            QMessageBox.warning(self, "Not loaded",
+                f"'{fname}' is not currently loaded.\n"
+                f"Use ? Load File to load it first.")
+            return
+        if self.file_cb.currentIndex() != fidx:
+            self._block_sigs(True)
+            self.file_cb.setCurrentIndex(fidx)
+            self._block_sigs(False)
+            self._pop_sheets(restore=sname)
+        # Select the sheet
+        sidx = self.sheet_cb.findText(sname)
+        if sidx >= 0:
+            self.sheet_cb.setCurrentIndex(sidx)
+        self._display_sheet()
+        # Switch to the Route tab so the user can see the sheet
+        self.tabs.setCurrentIndex(0)
+
+    # ?????????????????????????????????????????????????????????????????????????
     # File loading
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _on_load_clicked(self):
         fname = self.file_cb.currentText()
         fpath = self._file_map.get(fname)
         if not fpath or (self._loader and self._loader.isRunning()): return
-        self._start_spinner(f"Loading {fname}…")
+        self._start_spinner(f"Loading {fname}?")
         self._load_warnings = []   # reset warning accumulator for this load
         self._loader = FileLoader(fname, fpath)
         self._loader.done.connect(self._on_load_done)
@@ -6908,7 +7373,7 @@ class MainWindow(QMainWindow):
         self._loader.start()
 
     def _on_sheet_warning(self, fname, sheet_name, message):
-        """Accumulate per-sheet parse warnings — shown as one summary after load."""
+        """Accumulate per-sheet parse warnings ? shown as one summary after load."""
         self._load_warnings.append((sheet_name, message))
 
     def _on_load_done(self, fname, sheets):
@@ -6953,7 +7418,7 @@ class MainWindow(QMainWindow):
             body = "\n\n".join(lines)
             QMessageBox.warning(
                 self,
-                f"Load warnings — {fname}",
+                f"Load warnings ? {fname}",
                 f"The following issues were found while loading {fname}.\n"
                 f"Affected sheets may appear empty or have missing data.\n\n"
                 f"{body}"
@@ -6970,7 +7435,7 @@ class MainWindow(QMainWindow):
             return
         plant_windows = self._get_plant_windows()
         if not plant_windows:
-            return   # no windows configured — nothing to optimise
+            return   # no windows configured ? nothing to optimise
         cfg = {
             "plant_windows":         plant_windows,
             "plant_win_penalty":     self._sw_plant_win_pen.value(),
@@ -7026,6 +7491,16 @@ class MainWindow(QMainWindow):
         if not fname or not sname or fname not in self._cache: return
         entry = self._cache[fname].get(sname)
         if not entry: return
+        # Changing sheet invalidates any previous search results ? clear them
+        # silently (no UI flash) before the tables are repopulated.
+        if hasattr(self, "_search_hits") and self._search_hits:
+            self._search_hits   = []
+            self._search_cursor = -1
+            self._search_status.setText("")
+            self._search_status.setStyleSheet("")
+            for btn in (self._search_prev_btn, self._search_next_btn,
+                        self._search_clear_btn):
+                btn.setEnabled(False)
         blocks     = entry["blocks"]
         self._driver_start = entry["start_time"]
         self._day_colour   = entry.get("day_colour", "")
@@ -7040,14 +7515,14 @@ class MainWindow(QMainWindow):
         self._mod_blocks = self._sheet_mods[key]
 
         # Original panel: when route corrections are active, render from the
-        # corrected baseline (_corrected_blocks) — never from solver output.
+        # corrected baseline (_corrected_blocks) ? never from solver output.
         # When corrections are off, render from raw cache blocks.
         corrections_on = (hasattr(self, "_chk_route_opt") and
                           self._chk_route_opt.isChecked())
         if corrections_on and key in self._corrected_blocks:
             orig_display = copy.deepcopy(self._corrected_blocks[key])
         elif corrections_on and key in self._sheet_mods:
-            # Corrections on but not snapshotted yet — use _sheet_mods
+            # Corrections on but not snapshotted yet ? use _sheet_mods
             orig_display = copy.deepcopy(self._sheet_mods[key])
         else:
             orig_display = copy.deepcopy(blocks)
@@ -7057,12 +7532,12 @@ class MainWindow(QMainWindow):
                        suppress_no_milking=suppress,
                        plant_windows=self._get_plant_windows() if hasattr(self, "_get_plant_windows") else {})
         self._render_editable()
-        # Tray is NOT cleared — removed farms persist across sheet switches
+        # Tray is NOT cleared ? removed farms persist across sheet switches
         total = sum(len(b["rows"]) for b in blocks)
         st = fmt_hhmm(self._driver_start) if self._driver_start else "?"
         self.statusBar().showMessage(
-            f"{fname}  /  {sname}  —  {len(blocks)} route(s), {total} farm(s)  |  Start: {st}"
-            + ("" if self.dm else "  ⚠ distance_matrix.csv not found"))
+            f"{fname}  /  {sname}  ?  {len(blocks)} route(s), {total} farm(s)  |  Start: {st}"
+            + ("" if self.dm else "  ? distance_matrix.csv not found"))
 
     def _stamp_orig_arr(self, orig_blocks, mod_blocks, start_time):
         """After the solver runs: restore _two_hr_win flags and _orig_arr
@@ -7071,7 +7546,7 @@ class MainWindow(QMainWindow):
         Each farm row is assigned a unique _uid at parse time (see parse_sheet).
         The solver preserves _uid through deepcopy, so we can look up any row
         in the original schedule regardless of which sheet or position it ended
-        up on after optimisation — no IRMA matching, no occurrence counting,
+        up on after optimisation ? no IRMA matching, no occurrence counting,
         no milking-signature heuristics needed.
         """
         if not start_time or not orig_blocks:
@@ -7081,7 +7556,7 @@ class MainWindow(QMainWindow):
             return
         all_orig_times = ct[0]
 
-        # Build map: _uid → (was_checked, orig_arr_time)
+        # Build map: _uid ? (was_checked, orig_arr_time)
         uid_map = {}
         for ob_i, block in enumerate(orig_blocks):
             btimes = all_orig_times[ob_i] if ob_i < len(all_orig_times) else None
@@ -7152,12 +7627,12 @@ class MainWindow(QMainWindow):
         if no_proc:
             routes = ", ".join(b.get("route","?") for b in no_proc)
             self._add_status.setText(
-                f"⚠  Route(s) {routes} have no processor — drag one from the tray")
+                f"?  Route(s) {routes} have no processor ? drag one from the tray")
             self._add_status_timer.start(8000)
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
     # Farm removal / reinsertion
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _on_manual_add(self):
         """Validate and add a manually entered farm row to the tray."""
@@ -7218,7 +7693,7 @@ class MainWindow(QMainWindow):
 
     def _edit_table_deletable_item(self):
         """Return the currently selected QTableWidgetItem in the Modified table
-        if it is a farm, dest, or block banner row — else None."""
+        if it is a farm, dest, or block banner row ? else None."""
         item = self.edit_table.currentItem()
         if item is None:
             return None
@@ -7237,10 +7712,10 @@ class MainWindow(QMainWindow):
     def _on_tray_delete(self):
         """Delete the selected item from the Modified table OR the tray,
         in that priority order (Modified table takes precedence)."""
-        # ── Modified table delete ─────────────────────────────────────────
+        # ?? Modified table delete ?????????????????????????????????????????
         edit_item = self._edit_table_deletable_item()
         if edit_item is not None and self._mod_blocks is not None:
-            # Block banner → delete entire block
+            # Block banner ? delete entire block
             b_idx_banner = edit_item.data(Qt.UserRole + 2)
             if b_idx_banner is not None:
                 if 0 <= b_idx_banner < len(self._mod_blocks):
@@ -7249,7 +7724,7 @@ class MainWindow(QMainWindow):
                     self._render_editable()
                 return
 
-            # Dest row → remove dest from its block
+            # Dest row ? remove dest from its block
             dd = edit_item.data(Qt.UserRole + 1)
             if dd is not None and dd[0] == "dest":
                 _, b_idx, d_idx = dd
@@ -7267,7 +7742,7 @@ class MainWindow(QMainWindow):
                     self._render_editable()
                 return
 
-            # Farm row → remove farm from its block
+            # Farm row ? remove farm from its block
             fd = edit_item.data(Qt.UserRole)
             if fd is not None:
                 b_idx, f_idx = fd
@@ -7279,7 +7754,7 @@ class MainWindow(QMainWindow):
                     self._render_editable()
                 return
 
-        # ── Tray delete ───────────────────────────────────────────────────
+        # ?? Tray delete ???????????????????????????????????????????????????
         row = self.farm_tray.currentRow()
         if row < 0:
             return
@@ -7294,7 +7769,7 @@ class MainWindow(QMainWindow):
         On CHECK: compute calc_times on the current _mod_blocks (so all other
         checked boxes are already in effect) and record that arrival as _orig_arr.
         This means each box captures exactly when the truck arrives in the
-        current version of the schedule — not the original unmodified schedule.
+        current version of the schedule ? not the original unmodified schedule.
 
         On UNCHECK: clear _orig_arr so a fresh time is captured if re-checked.
         """
@@ -7332,7 +7807,7 @@ class MainWindow(QMainWindow):
 
         farm["_two_hr_win"] = checked
         # Sync the flag back into the original cache so the Original table
-        # reflects the same state.  Use _uid for the lookup — unambiguous even
+        # reflects the same state.  Use _uid for the lookup ? unambiguous even
         # for farms that appear multiple times or have been moved between sheets.
         fname = self.file_cb.currentText()
         sname = self.sheet_cb.currentText()
@@ -7422,12 +7897,12 @@ class MainWindow(QMainWindow):
         self._add_m2f.setText(str(data.get("m2_finish", "") or ""))
         self._add_edpu.setText(str(data.get("edpu", "") or ""))
         self._add_loc.setText(str(data.get("location", "") or ""))
-        # Leave vol blank — user always enters that manually
+        # Leave vol blank ? user always enters that manually
         self._add_vol.setFocus()
 
     def _populate_proc_dropdown(self):
         """Build _proc_lookup from all loaded cache entries and populate the
-        processor key combo with known processor key→name pairs."""
+        processor key combo with known processor key?name pairs."""
         if not hasattr(self, "_proc_lookup"):
             self._proc_lookup = {}   # {key: name}
 
@@ -7451,7 +7926,7 @@ class MainWindow(QMainWindow):
         self._add_proc_key.clear()
         for key in sorted(self._proc_lookup.keys()):
             name = self._proc_lookup[key]
-            self._add_proc_key.addItem(f"{key}  —  {name}", userData=key)
+            self._add_proc_key.addItem(f"{key}  ?  {name}", userData=key)
         self._add_proc_key.lineEdit().setText(current_text)
         self._add_proc_key.blockSignals(False)
 
@@ -7459,9 +7934,9 @@ class MainWindow(QMainWindow):
         """When the user picks a processor from the dropdown, fill the name field."""
         key = self._add_proc_key.itemData(index)
         if key is None:
-            # Fallback: parse key from display text "key  —  name"
+            # Fallback: parse key from display text "key  ?  name"
             text = self._add_proc_key.itemText(index)
-            key = text.split("—")[0].strip() if "—" in text else text.strip()
+            key = text.split("?")[0].strip() if "?" in text else text.strip()
         name = getattr(self, "_proc_lookup", {}).get(key, "")
         self._add_proc_key.lineEdit().setText(key)
         if name:
@@ -7473,10 +7948,10 @@ class MainWindow(QMainWindow):
         Append a new empty block to the current sheet's modified route.
 
         A small dialog collects:
-          • Route name / number  (free text, e.g. "1082")
-          • Processor key        (numeric, e.g. 972712)
-          • Processor name       (free text, e.g. "Saputo Abbotsford - 2F")
-          • Optional partial volume (leave blank for "rest of load")
+          ? Route name / number  (free text, e.g. "1082")
+          ? Processor key        (numeric, e.g. 972712)
+          ? Processor name       (free text, e.g. "Saputo Abbotsford - 2F")
+          ? Optional partial volume (leave blank for "rest of load")
         """
         fname = self.file_cb.currentText()
         sname = self.sheet_cb.currentText()
@@ -7551,7 +8026,7 @@ class MainWindow(QMainWindow):
             try:
                 vol_partial = float(vol_raw.replace(",", "")) if vol_raw else None
             except ValueError:
-                status_lbl.setText("Invalid volume — enter a number or leave blank.")
+                status_lbl.setText("Invalid volume ? enter a number or leave blank.")
                 return
             dest = {"name": pn, "key": pk, "vol_partial": vol_partial}
             new_block = {
@@ -7566,7 +8041,7 @@ class MainWindow(QMainWindow):
             self._render_editable()
             self.statusBar().showMessage(
                 f"Added empty block '{new_block['route'] or '(unnamed)'}' "
-                f"→ {pn or pk} to sheet {sname}")
+                f"? {pn or pk} to sheet {sname}")
             dlg.accept()
 
         ok_btn.clicked.connect(_accept)
@@ -7602,7 +8077,7 @@ class MainWindow(QMainWindow):
             orig_ct = None
             flagged = 0
 
-            # Iterate until stable — cascading gate waits may push subsequent
+            # Iterate until stable ? cascading gate waits may push subsequent
             # farms' arrivals so that they now also exceed the wait threshold.
             max_passes = 20
             for _pass in range(max_passes):
@@ -7640,13 +8115,13 @@ class MainWindow(QMainWindow):
                         # arrival has shifted due to upstream cascading waits
                         elif farm.get("_two_hr_win") and farm.get("_orig_arr"):
                             if wait and wait > 30:
-                                # Still waiting — update baseline to current arrival
+                                # Still waiting ? update baseline to current arrival
                                 if arr != farm["_orig_arr"]:
                                     farm["_orig_arr"] = arr
                                     pass_changed = True
 
                 if not pass_changed:
-                    break  # stable — no more cascading changes
+                    break  # stable ? no more cascading changes
 
             # Sync flags to orig panel via uid
             if flagged:
@@ -7678,10 +8153,10 @@ class MainWindow(QMainWindow):
                 total_flagged += flagged
                 sheets_updated.add(sname)
 
-        # ── Always anchor the 3 suppressed ROBOT farms to their original arrival ──
+        # ?? Always anchor the 3 suppressed ROBOT farms to their original arrival ??
         # These farms have no valid milking window data so suppress_no_milking=True
-        # means calc_times returns wait=None for them → the normal auto-flag loop
-        # never triggers → the solver has no anchor for them → they end up anywhere.
+        # means calc_times returns wait=None for them ? the normal auto-flag loop
+        # never triggers ? the solver has no anchor for them ? they end up anywhere.
         # Fix: stamp _two_hr_win/_orig_arr from the original schedule regardless of wait.
         for sname, entry in self._cache[fname].items():
             if not isinstance(entry, dict): continue
@@ -7750,7 +8225,7 @@ class MainWindow(QMainWindow):
         key = (fname, sname)
         if key in self._sheet_mods:
             del self._sheet_mods[key]
-        # Remove any tray items that came from this sheet — the reset restores
+        # Remove any tray items that came from this sheet ? the reset restores
         # those farms from cache, so leaving them in the tray would cause
         # duplicates if the user dragged them back.
         rows_to_remove = [
@@ -7790,8 +8265,8 @@ class MainWindow(QMainWindow):
     def _on_manual_add_proc(self):
         """Validate and add a manually entered processor destination to the tray."""
         raw_text = self._add_proc_key.lineEdit().text().strip()
-        # If user selected from dropdown, text may be "key  —  name"
-        key_raw  = raw_text.split("—")[0].strip() if "—" in raw_text else raw_text
+        # If user selected from dropdown, text may be "key  ?  name"
+        key_raw  = raw_text.split("?")[0].strip() if "?" in raw_text else raw_text
         name_raw = self._add_proc_name.text().strip()
         # Auto-fill name from lookup if not manually entered
         if not name_raw and key_raw and hasattr(self, "_proc_lookup"):
@@ -7963,9 +8438,9 @@ class MainWindow(QMainWindow):
         self._mod_blocks[b_idx]["dest_key"]  = dests[0]["key"]
         self._render_editable()
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
     # Tab handling
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _on_tab_changed(self, idx):
         title = self.tabs.tabText(idx)
@@ -7973,9 +8448,9 @@ class MainWindow(QMainWindow):
         if title == "Solver": self._refresh_demand_targets()
         if title == "Debug": self._refresh_debug_tab()
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
     # Comparison tab
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _get_mod_blocks(self, fname, sname):
         """Get the modified blocks for a sheet, falling back to original."""
@@ -8016,7 +8491,7 @@ class MainWindow(QMainWindow):
                     blocks = orig_blocks
             else:
                 # When route corrections are active, use the corrected baseline
-                # (_corrected_blocks) — never solver output from _sheet_mods.
+                # (_corrected_blocks) ? never solver output from _sheet_mods.
                 corrections_on = (hasattr(self, "_chk_route_opt") and
                                   self._chk_route_opt.isChecked())
                 key = (fname, sname)
@@ -8027,7 +8502,7 @@ class MainWindow(QMainWindow):
                 else:
                     blocks = orig_blocks
             # Only skip if there is no cache entry at all (shouldn't happen here,
-            # but guard anyway). Do NOT skip empty mod_blocks — a solver run can
+            # but guard anyway). Do NOT skip empty mod_blocks ? a solver run can
             # legitimately empty a sheet by moving all its farms elsewhere, and
             # skipping it would make those litres disappear from the totals.
             if blocks is None: continue
@@ -8038,7 +8513,7 @@ class MainWindow(QMainWindow):
             elif "BLUE" in dc: bucket = "BLUE"
             else: bucket = "OTHER"
 
-            # Processor volumes — split across multiple dests if present
+            # Processor volumes ? split across multiple dests if present
             for block in blocks:
                 dests = block.get("dests") or []
                 if not dests:
@@ -8084,7 +8559,7 @@ class MainWindow(QMainWindow):
         orig_pv, orig_sr = self._agg_file(fname, use_mod=False)
         mod_pv,  mod_sr  = self._agg_file(fname, use_mod=True)
 
-        # Compute tray volume — farms currently sitting in the tray are excluded
+        # Compute tray volume ? farms currently sitting in the tray are excluded
         # from modified routes and will make the modified total appear lower.
         tray_vol = sum(
             f.get("prior_vol") or 0
@@ -8098,14 +8573,14 @@ class MainWindow(QMainWindow):
         diff = orig_total - mod_total
         if tray_vol > 0:
             self.statusBar().showMessage(
-                f"⚠  {tray_vol:,.0f} L in tray (not on any route) — "
+                f"?  {tray_vol:,.0f} L in tray (not on any route) ? "
                 f"Modified total is {diff:,.0f} L less than Original."
             )
         elif diff > 100:
-            # Unexplained discrepancy — shouldn't normally happen
+            # Unexplained discrepancy ? shouldn't normally happen
             self.statusBar().showMessage(
-                f"⚠  Modified total is {diff:,.0f} L less than Original "
-                f"with no farms in tray — check for blocks without a processor."
+                f"?  Modified total is {diff:,.0f} L less than Original "
+                f"with no farms in tray ? check for blocks without a processor."
             )
         else:
             self.statusBar().clearMessage()
@@ -8117,7 +8592,7 @@ class MainWindow(QMainWindow):
         self._fill_proc_comp(self._comp_tables["proc_orig"], orig_pv, all_procs, changed_procs, bold_changed=False)
         self._fill_proc_comp(self._comp_tables["proc_mod"],  mod_pv,  all_procs, changed_procs, bold_changed=True)
 
-        # Sheet summaries — build full sheet info dict keyed by sname
+        # Sheet summaries ? build full sheet info dict keyed by sname
         def sr_to_map(sr):
             return {s: (dc, km, ok, h) for s, dc, km, ok, h in sr}
         orig_sm = sr_to_map(orig_sr)
@@ -8156,9 +8631,9 @@ class MainWindow(QMainWindow):
             bg   = CLR_CHANGED if changed else (CLR_ALT if i%2==0 else CLR_WHITE)
             font = bold_font if (changed and bold_changed) else norm_font
             table.setItem(i, 0, self._comp_cell(proc,            bg, font, Qt.AlignLeft|Qt.AlignVCenter))
-            table.setItem(i, 1, self._comp_cell(f"{int(r_vol):,}" if r_vol else "—", bg, font))
-            table.setItem(i, 2, self._comp_cell(f"{int(b_vol):,}" if b_vol else "—", bg, font))
-            table.setItem(i, 3, self._comp_cell(f"{int(o_vol):,}" if o_vol else "—", bg, font))
+            table.setItem(i, 1, self._comp_cell(f"{int(r_vol):,}" if r_vol else "?", bg, font))
+            table.setItem(i, 2, self._comp_cell(f"{int(b_vol):,}" if b_vol else "?", bg, font))
+            table.setItem(i, 3, self._comp_cell(f"{int(o_vol):,}" if o_vol else "?", bg, font))
             table.setItem(i, 4, self._comp_cell(f"{int(total):,}", bg, font))
             tot_r += r_vol; tot_b += b_vol; tot_o += o_vol; tot_t += total
         r = len(all_procs)
@@ -8169,7 +8644,7 @@ class MainWindow(QMainWindow):
             table.setItem(r, col, tv)
 
     def _fill_sheet_comp(self, table, sheet_map, all_sheets, changed_sheets, bold_changed):
-        # Columns: Sheet | ● Red | ● Blue | ● Other | km | h
+        # Columns: Sheet | ? Red | ? Blue | ? Other | km | h
         table.clearSpans(); table.clear()
         table.setColumnCount(6)
         table.setHorizontalHeaderLabels(["Sheet", "Red", "Blue", "Other", "km", "Hours"])
@@ -8211,7 +8686,7 @@ class MainWindow(QMainWindow):
         CLR_BLUE_SUB = QColor("#bbdefb")
         CLR_OTH_SUB  = QColor("#e0e0e0")
         sub_colours  = {"RED": CLR_RED_SUB, "BLUE": CLR_BLUE_SUB, "OTHER": CLR_OTH_SUB}
-        dot_colours  = {"RED": "🔴", "BLUE": "🔵", "OTHER": "⚫"}
+        dot_colours  = {"RED": "?", "BLUE": "?", "OTHER": "?"}
 
         row_i = 0
         grand_km = 0.0; grand_h = 0.0; grand_ok = True
@@ -8225,17 +8700,17 @@ class MainWindow(QMainWindow):
                 table.setItem(row_i, 0, self._comp_cell(s, bg, font, Qt.AlignLeft|Qt.AlignVCenter))
                 # Colour dot columns
                 for col, b in enumerate(("RED","BLUE","OTHER"), start=1):
-                    dot = "■" if b == bucket else ""
+                    dot = "?" if b == bucket else ""
                     dot_bg = sub_colours[b] if b == bucket else bg
                     table.setItem(row_i, col, self._comp_cell(dot, dot_bg, font, Qt.AlignCenter))
                 if s in sheet_map:
                     _, km, ok, h = sheet_map[s]
                     km_str = f"{km:.1f}" if ok else f"~{km:.1f}*"
-                    h_str  = f"{h:.2f}" if h is not None else "—"
+                    h_str  = f"{h:.2f}" if h is not None else "?"
                     grand_km += km; grand_ok = grand_ok and ok
                     if h: grand_h += h
                 else:
-                    km_str = "—"; h_str = "—"
+                    km_str = "?"; h_str = "?"
                 table.setItem(row_i, 4, self._comp_cell(km_str, bg, font))
                 table.setItem(row_i, 5, self._comp_cell(h_str,  bg, font))
                 row_i += 1
@@ -8259,9 +8734,9 @@ class MainWindow(QMainWindow):
         table.setItem(row_i, 4, make_header_item(km_grand,          bg=CLR_TOTAL, fg=QColor("#000000")))
         table.setItem(row_i, 5, make_header_item(f"{grand_h:.2f}",  bg=CLR_TOTAL, fg=QColor("#000000")))
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
     # Dropdown signals
-    # ─────────────────────────────────────────────────────────────────────────
+    # ?????????????????????????????????????????????????????????????????????????
 
     def _on_year(self):  self._pop_months(); self._pop_files()
     def _on_month(self): self._pop_files()
@@ -8291,7 +8766,7 @@ def _run_selftests():
     # parse_hhmm
     check("parse_hhmm valid",   parse_hhmm("06:30") == dt_time(6, 30))
     check("parse_hhmm empty",   parse_hhmm("") is None)
-    check("parse_hhmm dash",    parse_hhmm("—") is None)
+    check("parse_hhmm dash",    parse_hhmm("?") is None)
     check("parse_hhmm garbage", parse_hhmm("not-a-time") is None)
 
     # time_in_window (normal + overnight + boundaries)
@@ -8353,9 +8828,9 @@ def _run_selftests():
 
     print()
     if fails:
-        print(f"SELFTEST FAILED — {len(fails)} failing check(s): {', '.join(fails)}")
+        print(f"SELFTEST FAILED ? {len(fails)} failing check(s): {', '.join(fails)}")
         return 1
-    print("SELFTEST PASSED — all checks ok")
+    print("SELFTEST PASSED ? all checks ok")
     return 0
 
 
