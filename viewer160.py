@@ -44,8 +44,8 @@ C_M2_FINISH=14; C_EDPU=17; C_ROUTE=21; C_LOCATION=32; C_PRIOR_VOL=51
 C_DRIVER_START = 52   # AZ1 ? driver start time (datetime.time)
 C_DAY_COLOUR   = 62   # BJ1 ? day colour string (RED/BLUE/GRASSFED/A2 etc.)
 
-DRIVE_SPEED_KMH = 50.0   # km/h average
-ONSITE_MIN      = 25.0   # fixed on-site setup minutes per stop
+DRIVE_SPEED_KMH = 60.0   # km/h average
+ONSITE_MIN      = 15.0   # fixed on-site setup minutes per stop
 PUMP_RATE_LPM   = 750.0  # litres per minute
 
 VEDDER_DEPART_EXTRA_MINS = 10   # extra minutes added to shift start (Vedder departure)
