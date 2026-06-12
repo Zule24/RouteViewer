@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller PyQt5 openpyxl
+          pip install -r requirements.txt
 
       - name: Sanity-check the source (compile + self-tests)
         # Catches syntax errors and breakage in the pure domain helpers before
