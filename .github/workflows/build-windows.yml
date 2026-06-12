@@ -1,0 +1,87 @@
+# Builds RouteViewer.exe on a Windows runner using PyInstaller.
+#
+# Triggers:
+#   - Push to main           (continuous builds)
+#   - Tag matching v*        (release builds attached to a GitHub Release)
+#   - Manual via the Actions tab ("Run workflow")
+#
+# Output: a downloadable artifact called RouteViewer-windows containing
+# RouteViewer.exe.  For tag pushes, the exe is also attached to the Release.
+#
+# Place this file at .github/workflows/build-windows.yml in your repo.
+
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags:     ['v*']
+  workflow_dispatch:   # adds a "Run workflow" button in the Actions tab
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'      # PyQt5 wheels are well-tested here
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller PyQt5 openpyxl
+
+      - name: Sanity-check the source (compile + self-tests)
+        # Catches syntax errors and breakage in the pure domain helpers before
+        # we spend a few minutes building the exe.  --selftest is the harness
+        # added in the refactor; it exercises calc_times helpers, the offload
+        # accounting, the floor/ceiling redistribution, etc.
+        run: |
+          python -m py_compile viewer158.py
+          python viewer158.py --selftest
+
+      - name: Build with PyInstaller
+        # --onefile           single self-contained exe
+        # --windowed          suppress the console window behind the GUI
+        # --name              output filename
+        # --add-data "src;."  bundle CSVs at the bundle root so get_data_dir()
+        #                     (sys._MEIPASS at runtime) finds them.
+        #                     Semicolon is the Windows path separator here.
+        # Matrices are bundled.  three_window_farms.json is intentionally NOT
+        # bundled — the loader treats it as optional and returns {} if absent.
+        run: >
+          pyinstaller --onefile --windowed --name "RouteViewer"
+          --add-data "distance_matrix.csv;."
+          --add-data "duration_matrix.csv;."
+          viewer158.py
+
+      - name: Smoke-test the exe builds and launches
+        # Run the frozen exe with --selftest so we know the bundle is wired up
+        # before we ship the artifact.  Without --windowed this would block on
+        # a GUI; --selftest exits before any Qt code runs.
+        shell: pwsh
+        run: |
+          .\dist\RouteViewer.exe --selftest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload exe as workflow artifact
+        # Available from the Actions run page for 90 days by default.
+        uses: actions/upload-artifact@v4
+        with:
+          name: RouteViewer-windows
+          path: dist/RouteViewer.exe
+          if-no-files-found: error
+
+      - name: Attach exe to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/RouteViewer.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
