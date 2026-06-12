@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pyinstaller PyQt5 openpyxl
 
       - name: Sanity-check the source (compile + self-tests)
         # Catches syntax errors and breakage in the pure domain helpers before
@@ -43,8 +43,8 @@ jobs:
         # added in the refactor; it exercises calc_times helpers, the offload
         # accounting, the floor/ceiling redistribution, etc.
         run: |
-          python -m py_compile viewer158.py
-          python viewer158.py --selftest
+          python -m py_compile viewer160.py
+          python viewer160.py --selftest
 
       - name: Build with PyInstaller
         # --onefile           single self-contained exe
@@ -53,12 +53,12 @@ jobs:
         # --add-data "src;."  bundle CSVs at the bundle root so get_data_dir()
         #                     (sys._MEIPASS at runtime) finds them.
         #                     Semicolon is the Windows path separator here.
-        # Matrices are bundled.  three_window_farms.json is intentionally NOT
-        # bundled — the loader treats it as optional and returns {} if absent.
+        # Matrices and the three-window farm overrides are all bundled.
         run: >
           pyinstaller --onefile --windowed --name "RouteViewer"
           --add-data "distance_matrix.csv;."
           --add-data "duration_matrix.csv;."
+          --add-data "three_window_farms.json;."
           viewer160.py
 
       - name: Smoke-test the exe builds and launches
