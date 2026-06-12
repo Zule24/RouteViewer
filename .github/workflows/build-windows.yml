@@ -59,7 +59,7 @@ jobs:
           pyinstaller --onefile --windowed --name "RouteViewer"
           --add-data "distance_matrix.csv;."
           --add-data "duration_matrix.csv;."
-          viewer158.py
+          viewer160.py
 
       - name: Smoke-test the exe builds and launches
         # Run the frozen exe with --selftest so we know the bundle is wired up
