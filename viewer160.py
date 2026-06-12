@@ -5541,7 +5541,7 @@ class MainWindow(QMainWindow):
         self._debug_info.setStyleSheet("color:#555; font-size:8pt;")
         dl.addWidget(self._debug_info)
 
-        # Main text area
+        # Main text area (raw block/timing data)
         self._debug_text = QTextEdit()
         self._debug_text.setReadOnly(True)
         self._debug_text.setFont(QFont("Courier New", 8))
@@ -7373,8 +7373,14 @@ class MainWindow(QMainWindow):
         self._loader.start()
 
     def _on_sheet_warning(self, fname, sheet_name, message):
-        """Accumulate per-sheet parse warnings ? shown as one summary after load."""
+        """Accumulate per-sheet parse warnings ? shown as one summary after load,
+        and also appended to the debug-tab text area in real time."""
         self._load_warnings.append((sheet_name, message))
+        if hasattr(self, "_debug_text"):
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%H:%M:%S")
+            self._debug_text.append(
+                f"[{ts}] LOAD WARNING  {fname} / {sheet_name}\n  {message}\n")
 
     def _on_load_done(self, fname, sheets):
         self._stop_spinner()
@@ -7472,6 +7478,11 @@ class MainWindow(QMainWindow):
     def _on_load_failed(self, fname, err):
         self._stop_spinner()
         self.statusBar().showMessage(f"Error loading {fname}: {err}")
+        if hasattr(self, "_debug_text"):
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%H:%M:%S")
+            self._debug_text.append(
+                f"[{ts}] LOAD ERROR  {fname}\n  {err}\n")
 
     def _update_day_colour_badge(self):
         bg, fg, text = day_colour_style(self._day_colour)
