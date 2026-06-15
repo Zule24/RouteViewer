@@ -1,6 +1,8 @@
-current ver: viewer170
+current ver: viewer171
 
 ver history
+
+171: overhauled icons
 
 170: fixed icons
 
