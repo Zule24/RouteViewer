@@ -794,8 +794,21 @@ def parse_sheet(ws, ws_formula=None):
     raw_colour = ws.cell(1, C_DAY_COLOUR).value
     day_colour = str(raw_colour).strip().upper() if raw_colour else ""
 
-    all_rows = [row for row in ws.iter_rows()
-                if hasattr(row[0], 'row')]
+    # Determine the effective row range without walking every cell.
+    # ws.max_row can be inflated by phantom rows (e.g. from Excel scrolling
+    # or accidental edits far down the sheet).  Instead of iter_rows() which
+    # materialises every cell, scan only the columns the parser cares about
+    # to find the last row that actually has content.  This is O(real_data)
+    # rather than O(max_row * max_col) and avoids stalls on large June files.
+    MAX_SCAN_ROWS = min(ws.max_row, 5000)   # safety cap ? no route sheet has 5000 rows
+    SCAN_COLS = {C_IRMA, 2, 6}             # IRMA, col-2 (delivery/route headers), col-6 (dest)
+    last_data_row = 0
+    for r in range(1, MAX_SCAN_ROWS + 1):
+        for c in SCAN_COLS:
+            if ws.cell(r, c).value is not None:
+                last_data_row = r
+                break
+    all_row_nums = list(range(1, last_data_row + 1))
     irma_header_rows = []
     # dest_list_rows maps irma_header_row -> [dest_dict, ...]
     dest_list_rows = {}
@@ -803,8 +816,8 @@ def parse_sheet(ws, ws_formula=None):
     preload_dests = []
 
     i = 0
-    while i < len(all_rows):
-        r    = all_rows[i][0].row
+    while i < len(all_row_nums):
+        r    = all_row_nums[i]
         val0 = ws.cell(r, C_IRMA).value
         c2   = ws.cell(r, 2).value
 
@@ -817,8 +830,8 @@ def parse_sheet(ws, ws_formula=None):
             if hdr_key is not None:
                 dest_list_rows.setdefault(hdr_key, [])
                 j = i + 1
-                while j < len(all_rows):
-                    dr = all_rows[j][0].row
+                while j < len(all_row_nums):
+                    dr = all_row_nums[j]
                     # Stop at empty row or another section header
                     c2j = ws.cell(dr, 2).value
                     if c2j is None and ws.cell(dr, C_DEST_NAME).value is None:
@@ -834,8 +847,8 @@ def parse_sheet(ws, ws_formula=None):
                 # Capture dests into preload_dests (only the first such section).
                 if not preload_dests:
                     j = i + 1
-                    while j < len(all_rows):
-                        dr  = all_rows[j][0].row
+                    while j < len(all_row_nums):
+                        dr  = all_row_nums[j]
                         c2j = ws.cell(dr, 2).value
                         if c2j is None and ws.cell(dr, C_DEST_NAME).value is None:
                             break
@@ -852,8 +865,8 @@ def parse_sheet(ws, ws_formula=None):
             hdr_key = irma_header_rows[-1] if irma_header_rows else None
             if hdr_key is not None and hdr_key not in dest_list_rows:
                 nxt = i + 1
-                if nxt < len(all_rows):
-                    dr = all_rows[nxt][0].row
+                if nxt < len(all_row_nums):
+                    dr = all_row_nums[nxt]
                     d = _parse_dest_row(ws, dr, ws_formula=ws_formula)
                     if d:
                         dest_list_rows[hdr_key] = [d]
@@ -874,8 +887,7 @@ def parse_sheet(ws, ws_formula=None):
             "rows":      [],
             "preload":   True,
         })
-    for row in all_rows:
-        r    = row[0].row
+    for r in all_row_nums:
         val0 = ws.cell(r, C_IRMA).value
         if isinstance(val0, str) and val0.strip().upper() == "IRMA#":
             route_val = ws.cell(r, C_ROUTE).value or ""
@@ -6726,9 +6738,10 @@ class MainWindow(QMainWindow):
                 mod_rows.extend(block["rows"])
 
             # ?? Find original IRMA data row numbers ????????????????????????
+            # Scan only up to the last row with content in IRMA col rather
+            # than iter_rows() which walks every cell including phantom rows.
             irma_ws_rows = []
-            for row in ws.iter_rows():
-                r    = row[0].row
+            for r in range(1, min(ws.max_row, 5000) + 1):
                 val0 = ws.cell(r, C_IRMA).value
                 if isinstance(val0, str) and IRMA_RE.match(val0.strip()):
                     irma_ws_rows.append(r)
@@ -6801,14 +6814,13 @@ class MainWindow(QMainWindow):
                         _write_cell(ws_row, col, None)
 
             # ?? Write dest rows back (delivery information section) ????????
-            # Find all numbered delivery rows in this sheet and update volumes
+            # Find all numbered delivery rows in this sheet and update volumes.
+            # Same targeted scan as above ? avoid iter_rows() on phantom sheets.
             DEST_WRITE_COLS = {C_DEST_VOL, C_DEST_NAME, C_DEST_KEY}
             dest_target = set()
-            all_ws_rows_list = list(ws.iter_rows())
             deliv_data_rows = []  # rows with dest content
             in_deliv = False
-            for row in all_ws_rows_list:
-                r  = row[0].row
+            for r in range(1, min(ws.max_row, 5000) + 1):
                 c2 = ws.cell(r, 2).value
                 if isinstance(c2, str) and "delivery" in c2.lower():
                     in_deliv = True; deliv_data_rows = []; continue
