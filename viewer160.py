@@ -53,7 +53,7 @@ PRELOAD_WASH_MINS        = 75   # wash time added after a preload offload (1h 15
 INTER_PROCESSOR_BREAK    = 10   # break minutes inserted between processor stops
 
 # Farms whose milking windows can be suppressed (e.g. robots / continuous milking)
-NO_MILKING_WINDOW_FARMS = {"37-874", "14-247", "92-545"}
+NO_MILKING_WINDOW_FARMS = {"37-874", "14-247", "92-545","14-247"}
 
 # Three-window farm data loaded from JSON at startup
 def _load_three_window_farms():
@@ -181,10 +181,22 @@ def month_key(name):
 # ?? Milking window conflict ??????????????????????????????????????????????????
 
 def parse_hhmm(s):
-    """Parse 'HH:MM' string to datetime.time, or return None."""
+    """Parse 'HH:MM' string ? datetime.time, or return None.
+
+    Also accepts:
+    - datetime.time directly (pass-through) ? handles cells that openpyxl
+      returns as time objects rather than strings on some Excel files.
+    - float Excel time serial (fraction of a day) ? converts to time.
+    """
+    if s is None: return None
+    if isinstance(s, dt_time): return s
+    if isinstance(s, float):
+        # Excel serial: fraction of 24h
+        total_mins = round(s * 24 * 60)
+        return dt_time(total_mins // 60 % 24, total_mins % 60)
     if not s or s == "?": return None
     try:
-        h, m = s.split(":")
+        h, m = str(s).split(":")
         return dt_time(int(h), int(m))
     except (ValueError, AttributeError):
         return None
@@ -6844,9 +6856,14 @@ class MainWindow(QMainWindow):
             # farm row travel when the solver swaps farms ? without this, a
             # farm's name and address stay behind and end up next to a different
             # farm's IRMA.
+            # Explicitly exclude WRITE_COLS from extra_cols_in_use so that if
+            # _extra_cells ever contains a milking-time or other named column
+            # (e.g. from a manually-added farm or an older parsed file), the
+            # extra write can never overwrite the named-field write below.
             extra_cols_in_use = set()
             for fd in mod_rows:
                 extra_cols_in_use.update((fd.get("_extra_cells") or {}).keys())
+            extra_cols_in_use -= WRITE_COLS   # named fields always win
             sheet_write_cols = WRITE_COLS | extra_cols_in_use
 
             # ?? Unmerge any merged ranges that overlap our target rows/cols ?
@@ -6890,6 +6907,8 @@ class MainWindow(QMainWindow):
                     for col, fkey in [(C_M1_START,"m1_start"),(C_M1_FINISH,"m1_finish"),
                                       (C_M2_START,"m2_start"),(C_M2_FINISH,"m2_finish")]:
                         raw = fd.get(fkey, "")
+                        # Write as datetime.time ? cells are formatted h:mm;@ so
+                        # they expect a time serial, not a text string.
                         _write_cell(ws_row, col, parse_hhmm(raw) if raw else None)
                     # Extras (farm name, street address, anything else that was
                     # in the row at parse time).  Write what this farm has, and
