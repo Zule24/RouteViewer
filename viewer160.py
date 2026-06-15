@@ -4656,7 +4656,7 @@ class MainWindow(QMainWindow):
         def lbl(t): l=QLabel(t); l.setFont(bold); return l
 
         # ?? Folder browser ????????????????????????????????????????????????
-        self.browse_btn = QPushButton("?  Browse for Folder?")
+        self.browse_btn = QPushButton("Browse for Folder...")
         self.browse_btn.setFixedHeight(28)
         self.browse_btn.setToolTip(
             "Choose the root data folder.\n"
@@ -4682,7 +4682,7 @@ class MainWindow(QMainWindow):
         self.file_cb = QComboBox(); ll.addWidget(self.file_cb)
         ll.addSpacing(2)
 
-        self.load_btn = QPushButton("?  Load File")
+        self.load_btn = QPushButton("Load File")
         self.load_btn.setFixedHeight(28)
         self.load_btn.clicked.connect(self._on_load_clicked)
         ll.addWidget(self.load_btn)
@@ -4746,7 +4746,7 @@ class MainWindow(QMainWindow):
         ll.addStretch()
 
         # ?? Bottom action buttons ??????????????????????????????????????????????
-        self.export_btn = QPushButton("?  Export to Excel?")
+        self.export_btn = QPushButton("Export to Excel...")
         self.export_btn.setFixedHeight(30)
         self.export_btn.setStyleSheet(
             "QPushButton { background:#43a047; color:white; font-weight:bold; "
@@ -4756,7 +4756,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.export_btn)
         ll.addSpacing(3)
 
-        self.reset_sheet_btn = QPushButton("?  Reset This Sheet")
+        self.reset_sheet_btn = QPushButton("Reset This Sheet")
         self.reset_sheet_btn.setFixedHeight(26)
         self.reset_sheet_btn.setStyleSheet(
             "QPushButton { background:#29b6f6; color:white; font-weight:bold; "
@@ -4766,7 +4766,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.reset_sheet_btn)
         ll.addSpacing(3)
 
-        self.reset_btn = QPushButton("?  Reset All to Original")
+        self.reset_btn = QPushButton("Reset All to Original")
         self.reset_btn.setFixedHeight(26)
         self.reset_btn.setStyleSheet(
             "QPushButton { background:#e57373; color:white; font-weight:bold; "
@@ -4776,7 +4776,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.reset_btn)
         ll.addSpacing(4)
 
-        self.irma_lookup_btn = QPushButton("?  IRMA Farm Lookup?")
+        self.irma_lookup_btn = QPushButton("IRMA Farm Lookup...")
         self.irma_lookup_btn.setFixedHeight(28)
         self.irma_lookup_btn.setStyleSheet(
             "QPushButton { background:#6a1b9a; color:white; font-weight:bold; "
@@ -4811,15 +4811,15 @@ class MainWindow(QMainWindow):
         sl = QHBoxLayout(search_frame)
         sl.setContentsMargins(6, 3, 6, 3); sl.setSpacing(6)
 
-        sl.addWidget(QLabel("?  IRMA Search:"))
+        sl.addWidget(QLabel("IRMA Search:"))
         self._search_box = QLineEdit()
         self._search_box.setPlaceholderText("e.g. 71-117  (Enter to search, Esc to clear)")
         self._search_box.setFixedWidth(230)
         sl.addWidget(self._search_box)
 
-        self._search_prev_btn = QPushButton("? Prev")
-        self._search_next_btn = QPushButton("? Next")
-        self._search_clear_btn = QPushButton("? Clear")
+        self._search_prev_btn = QPushButton("< Prev")
+        self._search_next_btn = QPushButton("Next >")
+        self._search_clear_btn = QPushButton("Clear")
         for btn in (self._search_prev_btn, self._search_next_btn, self._search_clear_btn):
             btn.setFixedHeight(24)
             btn.setFixedWidth(64)
@@ -4898,7 +4898,7 @@ class MainWindow(QMainWindow):
         tray_hdr_l = QHBoxLayout(tray_hdr_row); tray_hdr_l.setContentsMargins(0,0,0,0); tray_hdr_l.setSpacing(6)
         lbl_t = QLabel("Removed Farms & Processors  ?  drag from Modified to remove  |  drag back to restore")
         lbl_t.setFont(bold); tray_hdr_l.addWidget(lbl_t, stretch=1)
-        self._tray_del_btn = QPushButton("?  Delete Selected")
+        self._tray_del_btn = QPushButton("Delete Selected")
         self._tray_del_btn.setFixedHeight(24)
         self._tray_del_btn.setStyleSheet(
             "QPushButton { background:#e53935; color:white; font-weight:bold; "
@@ -4908,7 +4908,7 @@ class MainWindow(QMainWindow):
         self._tray_del_btn.clicked.connect(self._on_tray_delete)
         tray_hdr_l.addWidget(self._tray_del_btn)
 
-        self.add_block_btn = QPushButton("?  Add Block")
+        self.add_block_btn = QPushButton("+ Add Block")
         self.add_block_btn.setFixedHeight(24)
         self.add_block_btn.setStyleSheet(
             "QPushButton { background:#7b1fa2; color:white; font-weight:bold; "
@@ -5289,7 +5289,7 @@ class MainWindow(QMainWindow):
         run_l.setSpacing(6)
         run_l.setAlignment(Qt.AlignTop)
 
-        self._solve_btn = QPushButton("?  Run Solver")
+        self._solve_btn = QPushButton("Run Solver")
         self._solve_btn.setFixedHeight(36)
         self._solve_btn.setStyleSheet(
             "QPushButton { background:#1e88e5; color:white; font-weight:bold; "
@@ -5298,7 +5298,7 @@ class MainWindow(QMainWindow):
         self._solve_btn.clicked.connect(self._on_solve_clicked)
         run_l.addWidget(self._solve_btn)
 
-        self._intra_btn = QPushButton("?  Optimise Within Routes")
+        self._intra_btn = QPushButton("Optimise Within Routes")
         self._intra_btn.setFixedHeight(28)
         self._intra_btn.setStyleSheet(
             "QPushButton { background:#00897b; color:white; font-weight:bold; "
@@ -5311,7 +5311,7 @@ class MainWindow(QMainWindow):
         self._intra_btn.clicked.connect(self._on_intra_route_apply)
         run_l.addWidget(self._intra_btn)
 
-        self._stop_btn = QPushButton("?  Stop")
+        self._stop_btn = QPushButton("Stop")
         self._stop_btn.setFixedHeight(36)
         self._stop_btn.setEnabled(False)
         self._stop_btn.setStyleSheet(
@@ -5401,7 +5401,7 @@ class MainWindow(QMainWindow):
         self._demand_open_edits   = {}
         self._demand_close_edits  = {}
 
-        refresh_btn = QPushButton("?  Refresh from File")
+        refresh_btn = QPushButton("Refresh from File")
         refresh_btn.setFixedHeight(24)
         refresh_btn.clicked.connect(self._refresh_demand_targets)
         demand_l.addWidget(refresh_btn)
@@ -5494,7 +5494,7 @@ class MainWindow(QMainWindow):
         hdr_lbl.setFont(bold)
         hrl.addWidget(hdr_lbl, stretch=1)
 
-        refresh_btn = QPushButton("?  Refresh")
+        refresh_btn = QPushButton("Refresh")
         refresh_btn.setFixedHeight(24)
         refresh_btn.setStyleSheet(
             "QPushButton { background:#546e7a; color:white; font-weight:bold; "
@@ -5502,7 +5502,7 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self._refresh_debug_tab)
         hrl.addWidget(refresh_btn)
 
-        copy_btn = QPushButton("?  Copy")
+        copy_btn = QPushButton("Copy")
         copy_btn.setFixedHeight(24)
         copy_btn.setStyleSheet(
             "QPushButton { background:#37474f; color:white; font-weight:bold; "
@@ -8948,16 +8948,6 @@ def _run_selftests():
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-
-    # Set Segoe UI Emoji as the app font so emoji characters render on all
-    # widgets including those with stylesheets.  A global stylesheet is used
-    # rather than app.setFont() because per-widget stylesheets that specify
-    # font-size or font-weight would otherwise reset the font family and lose
-    # the emoji fallback.  Setting it in the stylesheet makes it the baseline
-    # that those per-widget overrides inherit from rather than replace.
-    # On non-Windows platforms "Segoe UI Emoji" won't be found and Qt falls
-    # back to its own emoji font automatically.
-    app.setStyleSheet("* { font-family: 'Segoe UI Emoji'; }")
 
     # Populate THREE_WINDOW_FARMS before constructing MainWindow so that
     # calc_times and arrives_during_milking can use it from the start.
