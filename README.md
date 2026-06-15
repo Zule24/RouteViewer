@@ -2,6 +2,8 @@ current ver: viewer172
 
 ver history
 
+173: fixed name rendering
+
 172: added 0 vol farm handling, edited route locklist, changed setup to 15min
 
 171: overhauled icons
