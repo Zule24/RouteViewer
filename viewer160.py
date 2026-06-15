@@ -44,7 +44,7 @@ C_M2_FINISH=14; C_EDPU=17; C_ROUTE=21; C_LOCATION=32; C_PRIOR_VOL=51
 C_DRIVER_START = 52   # AZ1 ? driver start time (datetime.time)
 C_DAY_COLOUR   = 62   # BJ1 ? day colour string (RED/BLUE/GRASSFED/A2 etc.)
 
-DRIVE_SPEED_KMH = 60.0   # km/h average
+DRIVE_SPEED_KMH = 50.0   # km/h average
 ONSITE_MIN      = 15.0   # fixed on-site setup minutes per stop
 PUMP_RATE_LPM   = 750.0  # litres per minute
 
@@ -1474,7 +1474,6 @@ class EditableRouteTable(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.setShowGrid(True)
-        self.setFont(QFont("Segoe UI", 9))
         self.setDropIndicatorShown(False)   # we draw our own
         self._drop_indicator_row = -1       # visual row to draw indicator above
 
@@ -1780,7 +1779,6 @@ class FarmTray(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.setShowGrid(True)
-        self.setFont(QFont("Segoe UI", 9))
         self.setAlternatingRowColors(True)
 
     def keyPressEvent(self, event):
@@ -1837,8 +1835,8 @@ class FarmTray(QTableWidget):
         r = self.rowCount(); self.insertRow(r)
         mismatch = bool(farm_colour and current_colour and
                         farm_colour.upper().strip() != current_colour.upper().strip())
-        bold_font = QFont("Segoe UI", 9); bold_font.setBold(True)
-        normal_font = QFont("Segoe UI", 9)
+        bold_font = QFont(); bold_font.setBold(True)
+        normal_font = QFont()
         row_font = bold_font if mismatch else normal_font
 
         for c_idx, (_, key) in enumerate(TRAY_COLS):
@@ -1881,8 +1879,8 @@ class FarmTray(QTableWidget):
         r = self.rowCount(); self.insertRow(r)
         mismatch = bool(farm_colour and current_colour and
                         farm_colour.upper().strip() != current_colour.upper().strip())
-        bold_font = QFont("Segoe UI", 9); bold_font.setBold(True)
-        normal_font = QFont("Segoe UI", 9)
+        bold_font = QFont(); bold_font.setBold(True)
+        normal_font = QFont()
         row_font = bold_font if mismatch else normal_font
         CLR_DEST_TRAY = QColor("#e8f5e9")  # greenish to distinguish from farm rows
         for c_idx, (_, key) in enumerate(TRAY_COLS):
@@ -1917,8 +1915,8 @@ class FarmTray(QTableWidget):
 
     def refresh_bold_state(self, current_colour):
         """Bold rows whose farm type differs from current_colour."""
-        bold_font   = QFont("Segoe UI", 9); bold_font.setBold(True)
-        normal_font = QFont("Segoe UI", 9)
+        bold_font   = QFont(); bold_font.setBold(True)
+        normal_font = QFont()
         type_col = next((i for i,(_, k) in enumerate(TRAY_COLS) if k == "_day_colour"), None)
         for r in range(self.rowCount()):
             farm_colour = ""
@@ -4368,7 +4366,6 @@ class IRMALookupDialog(QDialog):
         self._query = QLineEdit()
         self._query.setPlaceholderText(
             "Full (71-117) or partial (71)  ?  Enter to search")
-        self._query.setFont(QFont("Segoe UI", 10))
         self._query.setMinimumWidth(200)
         bar.addWidget(self._query, stretch=1)
 
@@ -4390,7 +4387,6 @@ class IRMALookupDialog(QDialog):
 
         # ?? Status label ????????????????????????????????????????????????????
         self._status = QLabel("Enter an IRMA number and press Search or Enter.")
-        self._status.setFont(QFont("Segoe UI", 9))
         layout.addWidget(self._status)
 
         # ?? Results table ????????????????????????????????????????????????????
@@ -4405,7 +4401,6 @@ class IRMALookupDialog(QDialog):
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setFont(QFont("Segoe UI", 9))
         self._table.setToolTip("Double-click a row to navigate to that sheet")
         layout.addWidget(self._table, stretch=1)
 
@@ -4660,8 +4655,8 @@ class MainWindow(QMainWindow):
             QLabel { border: none; background: transparent; }
         """)
         tf = QVBoxLayout(timing_frame); tf.setContentsMargins(10,8,10,8); tf.setSpacing(5)
-        lbl_font  = QFont("Segoe UI", 8)
-        val_font  = QFont("Segoe UI", 8); val_font.setBold(True)
+        lbl_font  = QFont()
+        val_font  = QFont(); val_font.setBold(True)
         sep_color = "#e0e0e0"
         def add_timing_row(label, value, add_sep=True):
             row_w = QWidget(); row_w.setStyleSheet("background:transparent;")
@@ -4756,7 +4751,6 @@ class MainWindow(QMainWindow):
         self._search_box = QLineEdit()
         self._search_box.setPlaceholderText("e.g. 71-117  (Enter to search, Esc to clear)")
         self._search_box.setFixedWidth(230)
-        self._search_box.setFont(QFont("Segoe UI", 9))
         sl.addWidget(self._search_box)
 
         self._search_prev_btn = QPushButton("? Prev")
@@ -4783,7 +4777,6 @@ class MainWindow(QMainWindow):
         sl.addWidget(self._search_clear_btn)
 
         self._search_status = QLabel("")
-        self._search_status.setFont(QFont("Segoe UI", 9))
         self._search_status.setMinimumWidth(120)
         sl.addWidget(self._search_status)
         sl.addStretch()
@@ -4871,7 +4864,7 @@ class MainWindow(QMainWindow):
         add_frame = QFrame(); add_frame.setFrameShape(QFrame.StyledPanel)
         al = QVBoxLayout(add_frame); al.setContentsMargins(6,4,6,4); al.setSpacing(2)
 
-        field_font = QFont("Segoe UI", 9)
+        field_font = QFont()
         def _fe(placeholder, width=90):
             w = QLineEdit(); w.setPlaceholderText(placeholder)
             w.setFont(field_font); w.setFixedWidth(width); return w
@@ -5018,7 +5011,6 @@ class MainWindow(QMainWindow):
         title_row = QWidget()
         tr_l = QHBoxLayout(title_row); tr_l.setContentsMargins(0,0,0,0); tr_l.setSpacing(12)
         title = QLabel("ALNS Route Solver")
-        title.setFont(QFont("Segoe UI", 13, QFont.Bold))
         title.setStyleSheet("color: #1a3a5c;")
         tr_l.addWidget(title)
         subtitle = QLabel(
@@ -5324,7 +5316,6 @@ class MainWindow(QMainWindow):
         # Column header row
         col_hdr = QWidget(); col_hdr_l = QHBoxLayout(col_hdr)
         col_hdr_l.setContentsMargins(2,0,2,0); col_hdr_l.setSpacing(4)
-        hdr_font = QFont("Segoe UI", 7); hdr_font.setBold(True)
         for txt, w in [("Processor", 110), ("Volume", 88),
                        ("Open", 48), ("Close", 48)]:
             h = QLabel(txt); h.setFont(hdr_font); h.setFixedWidth(w)
@@ -6486,7 +6477,7 @@ class MainWindow(QMainWindow):
         self._demand_open_edits.clear()
         self._demand_close_edits.clear()
 
-        small_f = QFont("Segoe UI", 8)
+        small_f = QFont()
         win_re  = re.compile(r'^\d{1,2}:\d{2}$')   # basic HH:MM check
 
         for proc in sorted(totals.keys()):
@@ -6614,7 +6605,7 @@ class MainWindow(QMainWindow):
         if not fname or fname not in self._cache:
             return
 
-        small_f = QFont("Segoe UI", 9)
+        small_f = QFont()
         for sname, entry in self._cache[fname].items():
             if not isinstance(entry, dict):
                 continue
@@ -7050,7 +7041,6 @@ class MainWindow(QMainWindow):
         t.verticalHeader().setVisible(False)
         t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         t.setShowGrid(True)
-        t.setFont(QFont("Segoe UI", 9))
 
     def _init_comp_table(self, t):
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -7059,7 +7049,6 @@ class MainWindow(QMainWindow):
         t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         t.horizontalHeader().setStretchLastSection(True)
         t.setShowGrid(True)
-        t.setFont(QFont("Segoe UI", 9))
         t.setAlternatingRowColors(True)
 
     # ?????????????????????????????????????????????????????????????????????????
@@ -7977,8 +7966,8 @@ class MainWindow(QMainWindow):
         dl.setContentsMargins(14, 12, 14, 12)
         dl.setSpacing(8)
 
-        bold_f = QFont("Segoe UI", 9); bold_f.setBold(True)
-        small_f = QFont("Segoe UI", 9)
+        bold_f = QFont(); bold_f.setBold(True)
+        small_f = QFont()
 
         def _row(label, widget):
             rw = QWidget(); rl = QHBoxLayout(rw)
@@ -8629,8 +8618,8 @@ class MainWindow(QMainWindow):
         table.setColumnCount(5)
         table.setHorizontalHeaderLabels(["Processor", "Red (L)", "Blue (L)", "Other (L)", "Total (L)"])
         table.setRowCount(len(all_procs) + 1)
-        bold_font = QFont("Segoe UI", 9); bold_font.setBold(True)
-        norm_font = QFont("Segoe UI", 9)
+        bold_font = QFont(); bold_font.setBold(True)
+        norm_font = QFont()
         tot_r = tot_b = tot_o = tot_t = 0
         for i, proc in enumerate(all_procs):
             buckets  = proc_vols.get(proc, {"RED":0,"BLUE":0,"OTHER":0})
@@ -8659,8 +8648,8 @@ class MainWindow(QMainWindow):
         table.clearSpans(); table.clear()
         table.setColumnCount(6)
         table.setHorizontalHeaderLabels(["Sheet", "Red", "Blue", "Other", "km", "Hours"])
-        bold_font = QFont("Segoe UI", 9); bold_font.setBold(True)
-        norm_font = QFont("Segoe UI", 9)
+        bold_font = QFont(); bold_font.setBold(True)
+        norm_font = QFont()
 
         # Group by colour bucket for subtotals: RED rows, BLUE rows, OTHER rows
         # Order: RED sheets, then BLUE, then OTHER, then totals
