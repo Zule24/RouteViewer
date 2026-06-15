@@ -1,6 +1,8 @@
-current ver: viewer167
+current ver: viewer168
 
 ver history
+
+168: fixed emojis again
 
 167: fixed hdr issue caused by 166
 
