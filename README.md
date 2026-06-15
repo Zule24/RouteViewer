@@ -1,6 +1,8 @@
-current ver: viewer175
+current ver: viewer176
 
 ver history
+
+176: icons fix and 2h window overhaul
 
 175: updated distance and duration matricies 
 
