@@ -78,7 +78,7 @@ COLS = [
     ("M2 Start",     "m2_start"),
     ("M2 Finish",    "m2_finish"),
     ("EDPU",         "edpu"),
-    ("Location",     "location"),
+    ("Name / Location","location"),
     ("Prior Vol (L)","prior_vol"),
     ("Dist to",      "dist"),
     ("Arr.",         "arr_time"),
@@ -90,7 +90,9 @@ COLS = [
 TWO_HR_WIN_COL = next(i for i, (_, k) in enumerate(COLS) if k == "_two_hr_win")
 
 # Sheet names (exact, case-insensitive) that the solver leaves untouched.
-SOLVER_SKIP_SHEETS = {"1603", "1604"}
+SOLVER_SKIP_SHEETS = {"1603", "1604",
+                      "1531", "1021", "1031", "1071", "1125",
+                      "1081", "1451", "1281", "1441", "1121", "1561"}
 
 # Default plant receiving windows (open HH:MM, close HH:MM).
 # None means 24/7 ? no restriction.  Overnight windows (close < open) are
@@ -624,7 +626,17 @@ def calc_times(blocks, dm, start_time, dm_dur=None, suppress_no_milking=True,
                     block_times.append({"arr": None, "dep": None, "wait": None})
                 else:
                     arr_dt = cursor + timedelta(minutes=dm_m)
-                    vol    = farm.get("prior_vol") or 0
+                    vol    = farm.get("prior_vol")
+                    # Zero-vol farms in a paired set (same IRMA as another farm
+                    # in the block with non-zero vol) contribute 0 minutes ?
+                    # the truck arrives, connects the trailer, and leaves with
+                    # no pump time and no setup time.  arr == dep, no wait check.
+                    if isinstance(vol, (int, float)) and vol == 0:
+                        block_times.append({"arr": arr_dt.time(), "dep": arr_dt.time(),
+                                            "wait": None})
+                        cursor = arr_dt
+                        continue
+                    vol    = vol or 0
                     dur    = stop_duration(vol if isinstance(vol, (int, float)) else 0)
                     irma   = farm.get("irma","")
                     wait_mins = 0.0
@@ -1140,7 +1152,15 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
                                 "Reflects across both Original and Modified views.")
                         item.setData(Qt.UserRole, (b_idx, f_i))
                     else:
-                        item = make_data_item(row_data.get(key,""), bg=bg, draggable=editable)
+                        # For farm rows, show the farm name (from _extra_cells
+                        # col R=18) in the Location column instead of the raw
+                        # location string.  Processors keep their name as-is.
+                        if key == "location":
+                            farm_name = (row_data.get("_extra_cells") or {}).get(18, "")
+                            display_val = farm_name if farm_name else row_data.get(key, "")
+                        else:
+                            display_val = row_data.get(key, "")
+                        item = make_data_item(display_val, bg=bg, draggable=editable)
                     item.setData(Qt.UserRole, (b_idx, f_i))
                     table.setItem(r, c_idx, item)
                 r += 1
@@ -3797,23 +3817,86 @@ class ALNSSolver(QThread):
         # Farms with prior_vol == 0 (or falsy numeric) contribute nothing to
         # collection volume and skew the solver's cost function.  They are
         # removed from the working state, the solver ignores them entirely, and
-        # they are collected onto a dedicated "Zero Vol Farms" sheet on export.
-        # Key: (sname, b_idx) ? list of (f_idx_original, farm_dict) so they can
-        # be logged and collected by the export step.
-        zero_vol_farms = []   # list of (sname, b_idx, farm_dict)
+        # ?? Zero-vol farm pairing ?????????????????????????????????????????????
+        # Farms with prior_vol == 0 that share an IRMA with a non-zero farm in
+        # the same block are a "paired set" (e.g. T1 / T2 trailers at the same
+        # farm).  The solver must treat the pair as an atomic unit ? if one moves,
+        # both move together.  Zero-vol members contribute 0 minutes to the
+        # schedule (arr == dep, no setup, no pump, no milking wait).
+        #
+        # Strategy: strip zero-vol members before solving; after solving,
+        # re-insert them adjacent to their non-zero partner in the same block.
+        # The non-zero partner's block may have changed (solver moved it);
+        # we track by _uid so we always find it in the solved state.
+        #
+        # zero_vol_farms: list of (sname, b_idx, partner_uid, zero_farm_dict)
+        # where partner_uid is the _uid of the non-zero farm with the same IRMA.
+        zero_vol_farms = []   # (sname, b_idx, partner_uid, zero_farm)
+
+        def _find_partner_uid(blocks, b_idx, zero_irma, zero_uid):
+            """Return the _uid of the non-zero farm with the same IRMA in this block."""
+            for farm in blocks[b_idx].get("rows", []):
+                if farm.get("irma","") == zero_irma and farm.get("_uid") != zero_uid:
+                    pv = farm.get("prior_vol")
+                    if not (isinstance(pv, (int, float)) and pv == 0):
+                        return farm.get("_uid")
+            return None
 
         def _strip_zero_vol(sname, blocks):
+            """Strip zero-vol farms that have a non-zero partner with the same IRMA."""
             stripped = []
             for b_idx, block in enumerate(blocks):
+                irma_counts = {}
+                for farm in block.get("rows", []):
+                    irma_counts[farm.get("irma","")] = \
+                        irma_counts.get(farm.get("irma",""), 0) + 1
                 new_rows = []
                 for farm in block.get("rows", []):
-                    pv = farm.get("prior_vol")
-                    if isinstance(pv, (int, float)) and pv == 0:
-                        zero_vol_farms.append((sname, b_idx, copy.deepcopy(farm)))
+                    pv   = farm.get("prior_vol")
+                    irma = farm.get("irma","")
+                    # Only sideline if: vol==0 AND the same IRMA appears more
+                    # than once (i.e. there is a non-zero partner in this block)
+                    if (isinstance(pv, (int, float)) and pv == 0
+                            and irma_counts.get(irma, 0) > 1):
+                        partner_uid = _find_partner_uid(blocks, b_idx,
+                                                        irma, farm.get("_uid"))
+                        zero_vol_farms.append(
+                            (sname, b_idx, partner_uid, copy.deepcopy(farm)))
                     else:
                         new_rows.append(farm)
                 stripped.append(dict(block, rows=new_rows))
             return stripped
+
+        def _reinsert_zero_vol(result):
+            """Re-insert zero-vol farms adjacent to their partner in the solved state."""
+            if not zero_vol_farms:
+                return result
+            # Build a uid ? (sname, b_idx, f_idx) map across the solved state
+            uid_loc = {}
+            for sname, blocks in result.items():
+                for b_idx, block in enumerate(blocks):
+                    for f_idx, farm in enumerate(block.get("rows", [])):
+                        uid = farm.get("_uid")
+                        if uid:
+                            uid_loc[uid] = (sname, b_idx, f_idx)
+
+            for _orig_sname, _orig_b_idx, partner_uid, zero_farm in zero_vol_farms:
+                if partner_uid and partner_uid in uid_loc:
+                    sname, b_idx, f_idx = uid_loc[partner_uid]
+                    # Insert immediately after partner
+                    result[sname][b_idx]["rows"].insert(f_idx + 1, zero_farm)
+                    # Update uid_loc so subsequent insertions see the new indices
+                    for uid, (s, b, fi) in list(uid_loc.items()):
+                        if s == sname and b == b_idx and fi > f_idx:
+                            uid_loc[uid] = (s, b, fi + 1)
+                    uid_loc[zero_farm.get("_uid","")] = (sname, b_idx, f_idx + 1)
+                else:
+                    # Partner not found in solved state (shouldn't happen) ?
+                    # fall back to original sheet/block
+                    sname = _orig_sname
+                    if sname in result and _orig_b_idx < len(result[sname]):
+                        result[sname][_orig_b_idx]["rows"].append(zero_farm)
+            return result
 
         # Build volume targets from the non-skipped sheets only
         orig_dest_vols = {}
@@ -3827,9 +3910,9 @@ class ALNSSolver(QThread):
 
         if zero_vol_farms:
             self.log.emit(
-                f"  [{colour}] {len(zero_vol_farms)} zero-vol farm(s) sidelined "
-                f"from solver ? will appear on 'Zero Vol Farms' sheet on export: "
-                f"{', '.join(f['irma'] for _, _, f in zero_vol_farms)}")
+                f"  [{colour}] {len(zero_vol_farms)} zero-vol farm(s) held with "
+                f"their partner (solver treats pairs as atomic): "
+                f"{', '.join(f['irma'] for _, _, _, f in zero_vol_farms)}")
 
         # Optimize split positions for partial-dropoff dests on initial state
         if self.cfg.get("split_opt", False):
@@ -4317,10 +4400,13 @@ class ALNSSolver(QThread):
             )
             best_state = shuffled
 
-        # Accumulate zero-vol farms so run() can pass them to the export step.
+        # Accumulate zero-vol farms for logging; they are already re-inserted
+        # into the result below so they appear on their original route sheets.
         self.zero_vol_farms.extend(zero_vol_farms)
 
-        return {sname: blocks for sname, blocks in best_state}
+        result = {sname: blocks for sname, blocks in best_state}
+        _reinsert_zero_vol(result)
+        return result
 
     def run(self):
         fname  = self.fname
@@ -4619,7 +4705,6 @@ class MainWindow(QMainWindow):
         self._corrected_blocks = {}   # (fname, sname) -> corrected baseline (never overwritten by solver)
         self._loader      = None
         self._load_warnings = []   # per-sheet parse warnings from the current load
-        self._zero_vol_farms = []  # (sname, b_idx, farm_dict) ? populated after solve
         # Solver UI state
         self._locked_sheet_cbs  = {}   # sname -> QCheckBox  (populated per file)
         self._demand_open_edits  = {}  # proc_key -> QLineEdit (HH:MM)
@@ -6874,40 +6959,6 @@ class MainWindow(QMainWindow):
                     start_row=min_r, start_column=min_c,
                     end_row=max_r,   end_column=max_c)
 
-        # ?? Zero Vol Farms sheet ??????????????????????????????????????????????
-        # If the solver sidelined any zero-vol farms, append a summary sheet
-        # so they're visible and auditable in the exported file.
-        zero_farms = getattr(self, "_zero_vol_farms", [])
-        if zero_farms:
-            ZV_SHEET = "Zero Vol Farms"
-            # Remove existing sheet if present (re-export case)
-            if ZV_SHEET in wb.sheetnames:
-                del wb[ZV_SHEET]
-            zvws = wb.create_sheet(ZV_SHEET)
-
-            # Header row
-            headers = ["IRMA", "Route/Sheet", "Block #", "Farm Name",
-                       "Address", "Train", "M1 Start", "M1 Finish",
-                       "M2 Start", "M2 Finish", "EDPU", "Location"]
-            for col, hdr in enumerate(headers, 1):
-                cell = zvws.cell(1, col, hdr)
-                cell.font = openpyxl.styles.Font(bold=True)
-
-            for row_idx, (sname, b_idx, farm) in enumerate(zero_farms, 2):
-                extras = farm.get("_extra_cells") or {}
-                zvws.cell(row_idx, 1,  farm.get("irma", ""))
-                zvws.cell(row_idx, 2,  sname)
-                zvws.cell(row_idx, 3,  b_idx + 1)
-                zvws.cell(row_idx, 4,  extras.get(18, ""))   # farm name (col R)
-                zvws.cell(row_idx, 5,  extras.get(39, ""))   # street address (col AM)
-                zvws.cell(row_idx, 6,  farm.get("train", ""))
-                zvws.cell(row_idx, 7,  farm.get("m1_start", ""))
-                zvws.cell(row_idx, 8,  farm.get("m1_finish", ""))
-                zvws.cell(row_idx, 9,  farm.get("m2_start", ""))
-                zvws.cell(row_idx, 10, farm.get("m2_finish", ""))
-                zvws.cell(row_idx, 11, farm.get("edpu", ""))
-                zvws.cell(row_idx, 12, farm.get("location", ""))
-
         wb.save(dst_path)
 
     def _on_intra_route_apply(self):
@@ -7108,14 +7159,14 @@ class MainWindow(QMainWindow):
             self._stamp_orig_arr_from_map(new_blocks, global_uid_map)
             n_updated += 1
 
-        # Collect zero-vol farms from the solver thread so _export_xlsx can
-        # write them to the "Zero Vol Farms" sheet.
-        if hasattr(self._solver_thread, "zero_vol_farms"):
-            self._zero_vol_farms = getattr(self._solver_thread, "zero_vol_farms", [])
-            if self._zero_vol_farms:
-                self._solver_log.append(
-                    f"  {len(self._zero_vol_farms)} zero-vol farm(s) sidelined "
-                    f"? will be listed on 'Zero Vol Farms' sheet on export.")
+        # Log zero-vol farms that were held in place during the solve.
+        if hasattr(self._solver_thread, "zero_vol_farms") and \
+                self._solver_thread.zero_vol_farms:
+            n = len(self._solver_thread.zero_vol_farms)
+            irmas = ', '.join(f['irma'] for _, _, _, f
+                              in self._solver_thread.zero_vol_farms)
+            self._solver_log.append(
+                f"  {n} zero-vol farm(s) held with partner: {irmas}")
 
         self._solver_log.append(
             f"\n? Done ? {n_updated} sheets updated in Modified panel.")
