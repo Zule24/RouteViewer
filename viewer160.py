@@ -92,7 +92,8 @@ MWO_COL = next(i for i, (_, k) in enumerate(COLS) if k == "_mwo")
 # Sheet names (exact, case-insensitive) that the solver leaves untouched.
 SOLVER_SKIP_SHEETS = {"1603", "1604",
                       "1531", "1021", "1031", "1071", "1125",
-                      "1081", "1451", "1281", "1441", "1121", "1561", "1211"}
+                      "1081", "1451", "1281", "1441", "1121", "1561", "1211",
+                      "1421", "1431", "1023"}
 
 # Default plant receiving windows (open HH:MM, close HH:MM).
 # None means 24/7 ? no restriction.  Overnight windows (close < open) are
@@ -6781,51 +6782,50 @@ class MainWindow(QMainWindow):
             if key not in self._sheet_mods: continue
             mod_blocks = self._sheet_mods[key]
 
-            # -- Collect modified farm rows in sheet order ------------------
-            mod_rows = []
-            for block in mod_blocks:
-                mod_rows.extend(block["rows"])
-
-            # -- Find original IRMA data row numbers ------------------------
-            # Scan only up to the last row with content in IRMA col rather
-            # than iter_rows() which walks every cell including phantom rows.
-            irma_ws_rows = []
+            # -- Map farm row numbers to blocks ---------------------------------
+            # Each IRMA# header in the sheet starts a new block (leg).
+            # We collect the farm row numbers that follow each header so we
+            # can write each block's modified farms into the correct leg's
+            # rows.  The old flat approach (one list of all farm rows in order)
+            # put farms on the wrong leg when the solver moved them between
+            # blocks.
+            farm_rows_by_block = []   # [[excel_row, ...], ...] per block
+            current_farm_rows  = []
+            in_block = False
             for r in range(1, min(ws.max_row, 5000) + 1):
                 val0 = ws.cell(r, C_IRMA).value
-                if isinstance(val0, str) and IRMA_RE.match(val0.strip()):
-                    irma_ws_rows.append(r)
+                if isinstance(val0, str) and val0.strip().upper() == "IRMA#":
+                    if in_block:
+                        farm_rows_by_block.append(current_farm_rows)
+                    current_farm_rows = []
+                    in_block = True
+                elif in_block and isinstance(val0, str) and IRMA_RE.match(val0.strip()):
+                    current_farm_rows.append(r)
+            if in_block:
+                farm_rows_by_block.append(current_farm_rows)
 
-            if not irma_ws_rows:
+            if not farm_rows_by_block:
                 continue
 
-            # Columns that carry per-farm data: the named ones plus any extra
-            # columns captured at parse time (farm name, street address, ...).
-            # Including the extras in the write/unmerge set makes the *whole*
-            # farm row travel when the solver swaps farms ? without this, a
-            # farm's name and address stay behind and end up next to a different
-            # farm's IRMA.
-            # Explicitly exclude WRITE_COLS from extra_cols_in_use so that if
-            # _extra_cells ever contains a milking-time or other named column
-            # (e.g. from a manually-added farm or an older parsed file), the
-            # extra write can never overwrite the named-field write below.
+            irma_ws_rows_all = [r for rows in farm_rows_by_block for r in rows]
+
+            # extra cols across all mod blocks
+            mod_rows_all = [f for b in mod_blocks for f in b.get("rows", [])]
             extra_cols_in_use = set()
-            for fd in mod_rows:
+            for fd in mod_rows_all:
                 extra_cols_in_use.update((fd.get("_extra_cells") or {}).keys())
-            extra_cols_in_use -= WRITE_COLS   # named fields always win
+            extra_cols_in_use -= WRITE_COLS
             sheet_write_cols = WRITE_COLS | extra_cols_in_use
 
-            # -- Unmerge any merged ranges that overlap our target rows/cols -
-            # Build set of (row, col) tuples we intend to write so we can
-            # identify which merges to temporarily dissolve.
+            # -- Unmerge ----------------------------------------------------
             target_cells = set()
-            for ws_row in irma_ws_rows:
+            for ws_row in irma_ws_rows_all:
                 for col in sheet_write_cols:
                     target_cells.add((ws_row, col))
 
-            merges_to_redo = []   # list of (min_row, min_col, max_row, max_col)
+            merges_to_redo = []
             for merge_range in list(ws.merged_cells.ranges):
                 mr = merge_range
-                # Check if any cell in this merge overlaps our targets
                 overlaps = any(
                     (r, c) in target_cells
                     for r in range(mr.min_row, mr.max_row + 1)
@@ -6840,63 +6840,163 @@ class MainWindow(QMainWindow):
                     start_row=min_r, start_column=min_c,
                     end_row=max_r,   end_column=max_c)
 
-            # -- Write farm data --------------------------------------------
+            # -- Insert rows if any block has more farms than slots -----------
+            # Process last-to-first so that earlier blocks' row numbers don't
+            # need updating yet.  Track cumulative offset to shift earlier
+            # blocks' rows after all insertions are done.
+            total_inserted = [0] * len(farm_rows_by_block)   # rows inserted per block
+            for b_idx in range(len(farm_rows_by_block) - 1, -1, -1):
+                if b_idx >= len(mod_blocks):
+                    continue
+                slot_rows   = farm_rows_by_block[b_idx]
+                block_farms = mod_blocks[b_idx].get("rows", [])
+                extra = len(block_farms) - len(slot_rows)
+                if extra <= 0:
+                    continue
+
+                total_inserted[b_idx] = extra
+                insert_after = slot_rows[-1]
+                template_row = slot_rows[-1]
+
+                ws.insert_rows(insert_after + 1, extra)
+
+                # Replicate single-row merges and number formats from template
+                template_merges = [
+                    (mr.min_col, mr.max_col)
+                    for mr in ws.merged_cells.ranges
+                    if mr.min_row == template_row and mr.max_row == template_row
+                ]
+                for offset in range(extra):
+                    new_row = insert_after + 1 + offset
+                    for col in range(1, ws.max_column + 1):
+                        tmpl_cell = ws.cell(template_row, col)
+                        new_cell  = ws.cell(new_row, col)
+                        if tmpl_cell.number_format and \
+                                tmpl_cell.number_format != "General":
+                            new_cell.number_format = tmpl_cell.number_format
+                    for (min_c, max_c) in template_merges:
+                        try:
+                            ws.merge_cells(start_row=new_row, start_column=min_c,
+                                           end_row=new_row,   end_column=max_c)
+                        except Exception:
+                            pass
+                # Extend this block's slots with the new rows (insert_after is
+                # still valid since we inserted below it)
+                farm_rows_by_block[b_idx] = slot_rows + [
+                    insert_after + 1 + o for o in range(extra)]
+
+            # Now shift row numbers for blocks that come AFTER each insertion.
+            # Each block's insertion shifts all subsequent blocks' rows down.
+            # Compute cumulative offset from all insertions that precede each block.
+            cumulative = 0
+            for b_idx in range(len(farm_rows_by_block)):
+                if cumulative > 0:
+                    farm_rows_by_block[b_idx] = [
+                        r + cumulative for r in farm_rows_by_block[b_idx]]
+                cumulative += total_inserted[b_idx]
+
+            irma_ws_rows_all = [r for rows in farm_rows_by_block for r in rows]
+
+            # Recompute target_cells and merges_to_redo with updated row numbers
+            target_cells = set()
+            for ws_row in irma_ws_rows_all:
+                for col in sheet_write_cols:
+                    target_cells.add((ws_row, col))
+            merges_to_redo = []
+            for merge_range in list(ws.merged_cells.ranges):
+                mr = merge_range
+                overlaps = any(
+                    (r, c) in target_cells
+                    for r in range(mr.min_row, mr.max_row + 1)
+                    for c in range(mr.min_col, mr.max_col + 1)
+                )
+                if overlaps:
+                    merges_to_redo.append(
+                        (mr.min_row, mr.min_col, mr.max_row, mr.max_col))
+            for (min_r, min_c, max_r, max_c) in merges_to_redo:
+                ws.unmerge_cells(start_row=min_r, start_column=min_c,
+                                 end_row=max_r,   end_column=max_c)
+
+            written_rows = set()
+            if not hasattr(self, '_export_warnings'):
+                self._export_warnings = []
+
             def _write_cell(ws_row, col, value):
                 ws.cell(ws_row, col).value = value
 
-            for i, ws_row in enumerate(irma_ws_rows):
-                if i < len(mod_rows):
-                    fd = mod_rows[i]
-                    _write_cell(ws_row, C_IRMA,      fd.get("irma", ""))
-                    _write_cell(ws_row, C_TRAIN,     fd.get("train", ""))
-                    _write_cell(ws_row, C_EDPU,      fd.get("edpu", ""))
-                    _write_cell(ws_row, C_LOCATION,  fd.get("location", ""))
-                    _write_cell(ws_row, C_PRIOR_VOL, fd.get("prior_vol", None))
-                    for col, fkey in [(C_M1_START,"m1_start"),(C_M1_FINISH,"m1_finish"),
-                                      (C_M2_START,"m2_start"),(C_M2_FINISH,"m2_finish")]:
-                        raw = fd.get(fkey, "")
-                        # Write as datetime.time ? cells are formatted h:mm;@ so
-                        # they expect a time serial, not a text string.
-                        _write_cell(ws_row, col, parse_hhmm(raw) if raw else None)
-                    # Extras (farm name, street address, anything else that was
-                    # in the row at parse time).  Write what this farm has, and
-                    # clear any extra column the new farm doesn't supply so the
-                    # previous occupant's value can't bleed through.
-                    extras = fd.get("_extra_cells") or {}
-                    for col in extra_cols_in_use:
-                        _write_cell(ws_row, col, extras.get(col))
-                else:
+            for b_idx, block in enumerate(mod_blocks):
+                if b_idx >= len(farm_rows_by_block):
+                    break
+                slot_rows   = farm_rows_by_block[b_idx]
+                block_farms = block.get("rows", [])
+                for i, ws_row in enumerate(slot_rows):
+                    written_rows.add(ws_row)
+                    if i < len(block_farms):
+                        fd = block_farms[i]
+                        _write_cell(ws_row, C_IRMA,      fd.get("irma", ""))
+                        _write_cell(ws_row, C_TRAIN,     fd.get("train", ""))
+                        _write_cell(ws_row, C_EDPU,      fd.get("edpu", ""))
+                        _write_cell(ws_row, C_LOCATION,  fd.get("location", ""))
+                        _write_cell(ws_row, C_PRIOR_VOL, fd.get("prior_vol", None))
+                        for col, fkey in [(C_M1_START,"m1_start"),(C_M1_FINISH,"m1_finish"),
+                                          (C_M2_START,"m2_start"),(C_M2_FINISH,"m2_finish")]:
+                            raw = fd.get(fkey, "")
+                            _write_cell(ws_row, col, parse_hhmm(raw) if raw else None)
+                        extras = fd.get("_extra_cells") or {}
+                        for col in extra_cols_in_use:
+                            _write_cell(ws_row, col, extras.get(col))
+                    else:
+                        # More slots than farms in this block ? clear leftover
+                        for col in sheet_write_cols:
+                            _write_cell(ws_row, col, None)
+
+            # Clear any unreachable rows (extra blocks in sheet vs mod_blocks)
+            for ws_row in irma_ws_rows_all:
+                if ws_row not in written_rows:
                     for col in sheet_write_cols:
                         _write_cell(ws_row, col, None)
-
             # -- Write dest rows back (delivery information section) --------
-            # Find all numbered delivery rows in this sheet and update volumes.
-            # Same targeted scan as above ? avoid iter_rows() on phantom sheets.
+            # Each delivery section belongs to a specific block.  We map
+            # delivery section row numbers to their block index so each
+            # block's modified dests land in the correct section.
             DEST_WRITE_COLS = {C_DEST_VOL, C_DEST_NAME, C_DEST_KEY}
             dest_target = set()
-            deliv_data_rows = []  # rows with dest content
+
+            dest_rows_by_block = {}   # {block_idx: [excel_row, ...]}
+            cur_block_for_dest = -1
+            saw_irma_hdr = False
             in_deliv = False
+            cur_deliv_rows = []
+
+            def _flush_deliv(bidx, rows):
+                if rows:
+                    dest_rows_by_block.setdefault(bidx, []).extend(rows)
+
             for r in range(1, min(ws.max_row, 5000) + 1):
-                c2 = ws.cell(r, 2).value
-                if isinstance(c2, str) and "delivery" in c2.lower():
-                    in_deliv = True; deliv_data_rows = []; continue
-                if in_deliv:
+                val0 = ws.cell(r, 1).value
+                val2 = ws.cell(r, 2).value
+                if isinstance(val0, str) and val0.strip().upper() == "IRMA#":
+                    _flush_deliv(cur_block_for_dest, cur_deliv_rows)
+                    cur_deliv_rows = []; in_deliv = False
+                    cur_block_for_dest += 1
+                    saw_irma_hdr = True
+                elif isinstance(val2, str) and "delivery" in val2.lower():
+                    _flush_deliv(cur_block_for_dest, cur_deliv_rows)
+                    cur_deliv_rows = []; in_deliv = True
+                    if not saw_irma_hdr:
+                        cur_block_for_dest = 0   # preload block before first IRMA#
+                elif in_deliv:
                     dn = ws.cell(r, C_DEST_NAME).value
                     dk = ws.cell(r, C_DEST_KEY).value
                     if dn or dk:
-                        deliv_data_rows.append(r)
+                        cur_deliv_rows.append(r)
                     else:
-                        in_deliv = False
-            # Collect all dests from all mod_blocks in order
-            all_mod_dests = []
-            for block in mod_blocks:
-                dests_b = block.get("dests") or []
-                if not dests_b:
-                    dk = block.get("dest_key",""); dn = block.get("dest_name","")
-                    if dk: dests_b = [{"key":dk,"name":dn,"vol_partial":None}]
-                all_mod_dests.extend(dests_b)
-            # Unmerge dest rows
-            for dr in deliv_data_rows:
+                        _flush_deliv(cur_block_for_dest, cur_deliv_rows)
+                        cur_deliv_rows = []; in_deliv = False
+            _flush_deliv(cur_block_for_dest, cur_deliv_rows)
+
+            all_dest_rows = [r for rows in dest_rows_by_block.values() for r in rows]
+            for dr in all_dest_rows:
                 for col in DEST_WRITE_COLS:
                     dest_target.add((dr, col))
             dest_merges = []
@@ -6908,18 +7008,29 @@ class MainWindow(QMainWindow):
             for (min_r,min_c,max_r,max_c) in dest_merges:
                 ws.unmerge_cells(start_row=min_r,start_column=min_c,
                                  end_row=max_r,end_column=max_c)
-            for i, dr in enumerate(deliv_data_rows):
-                if i < len(all_mod_dests):
-                    d = all_mod_dests[i]
-                    vp = d.get("vol_partial")
-                    _write_cell(dr, C_DEST_VOL,  int(vp) if isinstance(vp,(int,float)) else None)
-                    _write_cell(dr, C_DEST_NAME, d.get("name",""))
-                    _write_cell(dr, C_DEST_KEY,
-                                int(d["key"]) if d.get("key","").isdigit() else d.get("key",""))
-                else:
-                    _write_cell(dr, C_DEST_VOL, None)
-                    _write_cell(dr, C_DEST_NAME, None)
-                    _write_cell(dr, C_DEST_KEY,  None)
+
+            for b_idx, block in enumerate(mod_blocks):
+                slot_rows = dest_rows_by_block.get(b_idx, [])
+                if not slot_rows:
+                    continue
+                dests_b = block.get("dests") or []
+                if not dests_b:
+                    dk = block.get("dest_key",""); dn = block.get("dest_name","")
+                    if dk: dests_b = [{"key":dk,"name":dn,"vol_partial":None}]
+                for i, dr in enumerate(slot_rows):
+                    if i < len(dests_b):
+                        d = dests_b[i]
+                        vp = d.get("vol_partial")
+                        _write_cell(dr, C_DEST_VOL,  int(vp) if isinstance(vp,(int,float)) else None)
+                        _write_cell(dr, C_DEST_NAME, d.get("name",""))
+                        _write_cell(dr, C_DEST_KEY,
+                                    int(d["key"]) if str(d.get("key","")).isdigit()
+                                    else d.get("key",""))
+                    else:
+                        _write_cell(dr, C_DEST_VOL,  None)
+                        _write_cell(dr, C_DEST_NAME, None)
+                        _write_cell(dr, C_DEST_KEY,  None)
+
             for (min_r,min_c,max_r,max_c) in dest_merges:
                 ws.merge_cells(start_row=min_r,start_column=min_c,
                                end_row=max_r,end_column=max_c)
@@ -6931,6 +7042,13 @@ class MainWindow(QMainWindow):
                     end_row=max_r,   end_column=max_c)
 
         wb.save(dst_path)
+
+        # Surface any per-block slot warnings
+        if hasattr(self, '_export_warnings') and self._export_warnings:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Export warnings",
+                "\n\n".join(self._export_warnings))
+            self._export_warnings = []
 
     def _on_intra_route_apply(self):
         """Launch the IntraRouteOptimiser thread."""
