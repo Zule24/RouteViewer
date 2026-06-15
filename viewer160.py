@@ -8936,6 +8936,16 @@ def _run_selftests():
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # On Windows, Qt's Fusion style picks a default font that doesn't include
+    # emoji glyphs, so buttons show ? instead of ? ? ? etc.  Setting
+    # "Segoe UI Emoji" at the application level adds it to the fallback chain
+    # for every widget without locking any individual widget to a specific font
+    # (which would break the fallback).  On non-Windows platforms this font
+    # simply won't be found and Qt silently uses its own emoji fallback.
+    emoji_font = QFont("Segoe UI Emoji", 9)
+    app.setFont(emoji_font)
+
     # Populate THREE_WINDOW_FARMS before constructing MainWindow so that
     # calc_times and arrives_during_milking can use it from the start.
     global THREE_WINDOW_FARMS
