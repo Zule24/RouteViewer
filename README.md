@@ -2,7 +2,7 @@ current ver: viewer175
 
 ver history
 
-174: updated distance and duration matricies 
+175: updated distance and duration matricies 
 
 174: updated exporting
 
