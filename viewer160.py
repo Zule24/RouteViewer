@@ -1910,7 +1910,11 @@ class FarmTray(QTableWidget):
                 val = "?" if farm_dict.get("_two_hr_win") else ""
                 bg = CLR_REMOVED; fg = None
             else:
-                val = farm_dict.get(key, "")
+                if key == "location":
+                    farm_name = (farm_dict.get("_extra_cells") or {}).get(18, "")
+                    val = farm_name if farm_name else farm_dict.get(key, "")
+                else:
+                    val = farm_dict.get(key, "")
                 bg  = CLR_REMOVED; fg = None
 
             item = QTableWidgetItem(str(val) if val is not None else "")
