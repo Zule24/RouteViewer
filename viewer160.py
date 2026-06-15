@@ -2975,6 +2975,9 @@ class ALNSSolver(QThread):
         self.sheet_mods    = sheet_mods or {}
         # locked_sheets: set of sname strings the solver must not modify
         self.locked_sheets = {str(s).strip() for s in (locked_sheets or set())}
+        # Accumulated across all colour groups during run(); read by MainWindow
+        # after solving to write the Zero Vol Farms sheet on export.
+        self.zero_vol_farms = []   # list of (sname, b_idx, farm_dict)
 
     def stop(self):
         self._stop = True
@@ -3778,6 +3781,28 @@ class ALNSSolver(QThread):
         if not sheets:
             return {}
 
+        # ?? Strip zero-vol farms before solving ???????????????????????????????
+        # Farms with prior_vol == 0 (or falsy numeric) contribute nothing to
+        # collection volume and skew the solver's cost function.  They are
+        # removed from the working state, the solver ignores them entirely, and
+        # they are collected onto a dedicated "Zero Vol Farms" sheet on export.
+        # Key: (sname, b_idx) ? list of (f_idx_original, farm_dict) so they can
+        # be logged and collected by the export step.
+        zero_vol_farms = []   # list of (sname, b_idx, farm_dict)
+
+        def _strip_zero_vol(sname, blocks):
+            stripped = []
+            for b_idx, block in enumerate(blocks):
+                new_rows = []
+                for farm in block.get("rows", []):
+                    pv = farm.get("prior_vol")
+                    if isinstance(pv, (int, float)) and pv == 0:
+                        zero_vol_farms.append((sname, b_idx, copy.deepcopy(farm)))
+                    else:
+                        new_rows.append(farm)
+                stripped.append(dict(block, rows=new_rows))
+            return stripped
+
         # Build volume targets from the non-skipped sheets only
         orig_dest_vols = {}
         for _sname, entry in sheets:
@@ -3785,8 +3810,14 @@ class ALNSSolver(QThread):
                 for dk, off in _block_dest_offloads(block).items():
                     orig_dest_vols[dk] = orig_dest_vols.get(dk, 0.0) + off
 
-        state      = [(sname, _initial_blocks(sname, entry))
-                      for sname, entry in sheets]
+        state = [(sname, _strip_zero_vol(sname, _initial_blocks(sname, entry)))
+                 for sname, entry in sheets]
+
+        if zero_vol_farms:
+            self.log.emit(
+                f"  [{colour}] {len(zero_vol_farms)} zero-vol farm(s) sidelined "
+                f"from solver ? will appear on 'Zero Vol Farms' sheet on export: "
+                f"{', '.join(f['irma'] for _, _, f in zero_vol_farms)}")
 
         # Optimize split positions for partial-dropoff dests on initial state
         if self.cfg.get("split_opt", False):
@@ -4274,6 +4305,9 @@ class ALNSSolver(QThread):
             )
             best_state = shuffled
 
+        # Accumulate zero-vol farms so run() can pass them to the export step.
+        self.zero_vol_farms.extend(zero_vol_farms)
+
         return {sname: blocks for sname, blocks in best_state}
 
     def run(self):
@@ -4573,6 +4607,7 @@ class MainWindow(QMainWindow):
         self._corrected_blocks = {}   # (fname, sname) -> corrected baseline (never overwritten by solver)
         self._loader      = None
         self._load_warnings = []   # per-sheet parse warnings from the current load
+        self._zero_vol_farms = []  # (sname, b_idx, farm_dict) ? populated after solve
         # Solver UI state
         self._locked_sheet_cbs  = {}   # sname -> QCheckBox  (populated per file)
         self._demand_open_edits  = {}  # proc_key -> QLineEdit (HH:MM)
@@ -5331,6 +5366,7 @@ class MainWindow(QMainWindow):
         demand_l.addWidget(demand_note)
 
         # Column header row
+        hdr_font = QFont(); hdr_font.setBold(True)
         col_hdr = QWidget(); col_hdr_l = QHBoxLayout(col_hdr)
         col_hdr_l.setContentsMargins(2,0,2,0); col_hdr_l.setSpacing(4)
         for txt, w in [("Processor", 110), ("Volume", 88),
@@ -6826,6 +6862,40 @@ class MainWindow(QMainWindow):
                     start_row=min_r, start_column=min_c,
                     end_row=max_r,   end_column=max_c)
 
+        # ?? Zero Vol Farms sheet ??????????????????????????????????????????????
+        # If the solver sidelined any zero-vol farms, append a summary sheet
+        # so they're visible and auditable in the exported file.
+        zero_farms = getattr(self, "_zero_vol_farms", [])
+        if zero_farms:
+            ZV_SHEET = "Zero Vol Farms"
+            # Remove existing sheet if present (re-export case)
+            if ZV_SHEET in wb.sheetnames:
+                del wb[ZV_SHEET]
+            zvws = wb.create_sheet(ZV_SHEET)
+
+            # Header row
+            headers = ["IRMA", "Route/Sheet", "Block #", "Farm Name",
+                       "Address", "Train", "M1 Start", "M1 Finish",
+                       "M2 Start", "M2 Finish", "EDPU", "Location"]
+            for col, hdr in enumerate(headers, 1):
+                cell = zvws.cell(1, col, hdr)
+                cell.font = openpyxl.styles.Font(bold=True)
+
+            for row_idx, (sname, b_idx, farm) in enumerate(zero_farms, 2):
+                extras = farm.get("_extra_cells") or {}
+                zvws.cell(row_idx, 1,  farm.get("irma", ""))
+                zvws.cell(row_idx, 2,  sname)
+                zvws.cell(row_idx, 3,  b_idx + 1)
+                zvws.cell(row_idx, 4,  extras.get(18, ""))   # farm name (col R)
+                zvws.cell(row_idx, 5,  extras.get(39, ""))   # street address (col AM)
+                zvws.cell(row_idx, 6,  farm.get("train", ""))
+                zvws.cell(row_idx, 7,  farm.get("m1_start", ""))
+                zvws.cell(row_idx, 8,  farm.get("m1_finish", ""))
+                zvws.cell(row_idx, 9,  farm.get("m2_start", ""))
+                zvws.cell(row_idx, 10, farm.get("m2_finish", ""))
+                zvws.cell(row_idx, 11, farm.get("edpu", ""))
+                zvws.cell(row_idx, 12, farm.get("location", ""))
+
         wb.save(dst_path)
 
     def _on_intra_route_apply(self):
@@ -7025,6 +7095,15 @@ class MainWindow(QMainWindow):
             self._sheet_mods[(fname, sname)] = new_blocks
             self._stamp_orig_arr_from_map(new_blocks, global_uid_map)
             n_updated += 1
+
+        # Collect zero-vol farms from the solver thread so _export_xlsx can
+        # write them to the "Zero Vol Farms" sheet.
+        if hasattr(self._solver_thread, "zero_vol_farms"):
+            self._zero_vol_farms = getattr(self._solver_thread, "zero_vol_farms", [])
+            if self._zero_vol_farms:
+                self._solver_log.append(
+                    f"  {len(self._zero_vol_farms)} zero-vol farm(s) sidelined "
+                    f"? will be listed on 'Zero Vol Farms' sheet on export.")
 
         self._solver_log.append(
             f"\n? Done ? {n_updated} sheets updated in Modified panel.")
