@@ -1,6 +1,8 @@
-current ver: viewer171
+current ver: viewer172
 
 ver history
+
+172: added 0 vol farm handling, edited route locklist, changed setup to 15min
 
 171: overhauled icons
 
