@@ -29,7 +29,7 @@ logger.addHandler(logging.NullHandler())
 
 IRMA_RE     = re.compile(r"^\d{2}-\d{3}$")
 SHEET_RE    = re.compile(r"^\d{4}$")  # kept for display logic
-EXCLUDE_SHEETS = {"INFO", "SHEET1"}  # sheets with no route data
+EXCLUDE_SHEETS = {"INFO", "SHEET1", "SHEET2"}  # sheets with no route data
 MONTH_ORDER = ["january","february","march","april","may","june",
                "july","august","september","october","november","december"]
 VOL_LIMIT   = 41500
@@ -1335,9 +1335,12 @@ def _try_eval_formula(formula_str):
 class FileLoader(QThread):
     done   = pyqtSignal(str, dict)
     failed = pyqtSignal(str, str)
-    # Emitted for non-fatal per-sheet warnings so the UI can surface them
-    # without aborting the whole load.  Payload: (fname, sheet_name, message)
+    # Non-fatal per-sheet parse warnings ? accumulated and shown in a dialog
+    # after load completes, and also written to the debug log.
     sheet_warning = pyqtSignal(str, str, str)
+    # Informational/timing log messages ? written to the debug log only,
+    # never shown in the warning dialog.
+    log = pyqtSignal(str)
 
     def __init__(self, fname, fpath):
         super().__init__()
@@ -1345,15 +1348,29 @@ class FileLoader(QThread):
 
     def run(self):
         try:
+            import time as _time
+            _t0 = _time.time()
+            self.log.emit(f"[{self.fname}] Opening workbook (data pass)?")
             wb_data = openpyxl.load_workbook(self.fpath, read_only=False, data_only=True)
+            self.log.emit(
+                f"[{self.fname}] Data workbook opened in {_time.time()-_t0:.1f}s, "
+                f"opening formula pass?")
+            _t1 = _time.time()
             wb_form = openpyxl.load_workbook(self.fpath, read_only=False, data_only=False)
+            self.log.emit(
+                f"[{self.fname}] Formula workbook opened in {_time.time()-_t1:.1f}s")
             sheets = {}
             for n in wb_data.sheetnames:
                 if n.strip().upper() in EXCLUDE_SHEETS:
                     continue
                 try:
+                    _ts = _time.time()
+                    self.log.emit(f"[{self.fname} / {n}] Parsing?")
                     blocks, start_time, day_colour = parse_sheet(
                         wb_data[n], ws_formula=wb_form[n])
+                    self.log.emit(
+                        f"[{self.fname} / {n}] Done in {_time.time()-_ts:.1f}s ? "
+                        f"{len(blocks)} block(s), start={start_time}, colour={day_colour!r}")
 
                     # ?? Post-parse diagnostics ????????????????????????????????
                     # Each check emits a specific warning so the user knows
@@ -7359,6 +7376,9 @@ class MainWindow(QMainWindow):
         self._loader.done.connect(self._on_load_done)
         self._loader.failed.connect(self._on_load_failed)
         self._loader.sheet_warning.connect(self._on_sheet_warning)
+        self._loader.log.connect(
+            lambda msg: self._debug_text.append(msg)
+            if hasattr(self, "_debug_text") else None)
         self._loader.start()
 
     def _on_sheet_warning(self, fname, sheet_name, message):
