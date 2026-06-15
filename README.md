@@ -1,6 +1,8 @@
-current ver: viewer176
+current ver: viewer177
 
 ver history
+
+177: export fixes
 
 176: icons fix and 2h window overhaul
 
