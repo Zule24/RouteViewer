@@ -1,6 +1,7 @@
-current ver: viewer168
+current ver: viewer169
 
 ver history
+169: overhauled sheet parser
 
 168: fixed emojis again
 
