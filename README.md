@@ -1,6 +1,8 @@
-current ver: viewer172
+current ver: viewer174
 
 ver history
+
+174: updated exporting
 
 173: fixed name rendering
 
