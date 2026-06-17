@@ -1,3 +1,5 @@
+https://docs.google.com/spreadsheets/d/1X30uhh2EC7XrYrvzFItgp8TOb9vqz16Qvay0F5lMZ9A/edit?usp=sharing
+
 current ver: viewer187
 
 ver history
