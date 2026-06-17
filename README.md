@@ -1,6 +1,8 @@
-current ver: viewer183
+current ver: viewer184
 
 ver history
+
+184: matrix updates
 
 183: solver changes
 
