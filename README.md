@@ -2,6 +2,8 @@ current ver: viewer187
 
 ver history
 
+188: added more knobs for solver and graphs for processor arrival overlaps
+
 187: export fixes and MWO overhaul
 
 186: changed solver to implement duration matrix
