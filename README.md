@@ -1,6 +1,8 @@
-current ver: viewer182
+current ver: viewer183
 
 ver history
+
+183: solver changes
 
 182: export fixes
 
