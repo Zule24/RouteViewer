@@ -779,6 +779,61 @@ def _parse_dest_row(ws, r, ws_formula=None):
     return {"name": dn, "key": dk, "vol_partial": vol_partial}
 
 
+class _FastCellCache:
+    """Wraps a read_only openpyxl worksheet to make random .cell(r, c) access
+    fast.
+
+    Background: openpyxl's read_only mode is a streaming reader with no
+    persistent in-memory model ? every call to ws.cell(r, c) re-parses the
+    sheet's XML from the start internally (via _cells_by_row / _reader.parse).
+    That's fine for the sequential access pattern read_only mode was designed
+    for (iter_rows top to bottom, once), but parse_sheet does repeated random
+    access (checking several columns per row, jumping around for delivery
+    sections), which is exactly the pattern read_only mode handles by
+    redundantly re-parsing ? turning a sub-second parse into several seconds
+    per sheet, multiplied across every sheet in the workbook.
+
+    This wrapper does ONE iter_rows() pass up front (the access pattern
+    read_only mode is actually fast at) and caches every cell value in a
+    plain dict, then answers all subsequent .cell(r, c).value calls from that
+    dict ? O(1) lookups instead of O(sheet size) re-parses.  Exposes just
+    enough of the worksheet interface (.cell(), .max_row, .max_column) for
+    parse_sheet's needs; not a general-purpose worksheet replacement.
+    """
+
+    class _CellProxy:
+        __slots__ = ("value",)
+        def __init__(self, value):
+            self.value = value
+
+    _EMPTY = None  # sentinel set below to a cached _CellProxy(None)
+
+    def __init__(self, ws):
+        self._values = {}
+        max_r = 0
+        max_c = 0
+        for row in ws.iter_rows():
+            for cell in row:
+                v = getattr(cell, "value", None)
+                r = getattr(cell, "row", None)
+                c = getattr(cell, "column", None)
+                if r is None or c is None:
+                    continue   # EmptyCell in read_only mode ? skip
+                if v is not None:
+                    self._values[(r, c)] = v
+                if r > max_r: max_r = r
+                if c > max_c: max_c = c
+        self.max_row    = max_r
+        self.max_column = max_c
+        self._empty = _FastCellCache._CellProxy(None)
+
+    def cell(self, row, column):
+        v = self._values.get((row, column))
+        if v is None:
+            return self._empty
+        return _FastCellCache._CellProxy(v)
+
+
 def parse_sheet(ws, ws_formula=None):
     """Parse one worksheet.  ws is the data_only workbook sheet;
     ws_formula (optional) is the same sheet from a formula workbook ? used
@@ -1411,8 +1466,17 @@ class FileLoader(QThread):
                 try:
                     _ts = _time.time()
                     self.log.emit(f"[{self.fname} / {n}] Parsing...")
+                    # Wrap the read_only worksheet in a fast cache before
+                    # parsing.  parse_sheet does repeated random .cell(r, c)
+                    # access, which in read_only mode re-parses the sheet's
+                    # XML from scratch on every call ? the cache does one
+                    # sequential pass up front and serves the rest from a
+                    # dict, which is what makes parsing genuinely fast rather
+                    # than just the workbook *open* being fast.
+                    ws_cached      = _FastCellCache(wb_data[n])
+                    ws_form_cached = _FastCellCache(wb_form[n])
                     blocks, start_time, day_colour = parse_sheet(
-                        wb_data[n], ws_formula=wb_form[n])
+                        ws_cached, ws_formula=ws_form_cached)
                     self.log.emit(
                         f"[{self.fname} / {n}] Done in {_time.time()-_ts:.1f}s - "
                         f"{len(blocks)} block(s), start={start_time}, colour={day_colour!r}")
