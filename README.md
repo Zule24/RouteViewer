@@ -1,6 +1,8 @@
-current ver: viewer186
+current ver: viewer187
 
 ver history
+
+187: export fixes and MWO overhaul
 
 186: changed solver to implement duration matrix
 
