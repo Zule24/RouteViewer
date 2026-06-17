@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QFrame, QHeaderView, QAbstractItemView, QTabWidget, QSplitter,
     QScrollBar, QScrollArea, QDoubleSpinBox, QSpinBox, QProgressBar,
     QGroupBox, QCheckBox, QTextEdit, QSizePolicy, QDialog,
-    QLineEdit, QMessageBox, QFileDialog
+    QLineEdit, QMessageBox, QFileDialog, QToolTip
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray
 from PyQt5.QtGui import QFont, QColor, QDrag, QPainter, QPen
@@ -126,6 +126,19 @@ PLANT_RECEIVING_WINDOWS = {
     "929011": ("06:00", "18:00"),  # Earth's Own / A2       ? 6am?6pm
     "912015": ("05:00", "17:00"),  # GRASSFED Meadowfresh   ? 5am?5pm
     "913011": ("06:00", "08:00"),  # Farmhouse Agassiz      ? 6am?8am
+}
+
+# Time windows where a delivery is still allowed (the plant is open per
+# PLANT_RECEIVING_WINDOWS above) but heavily discouraged ? e.g. another
+# division's trucks need the same dock during this slot, so ours should use
+# it outside this window whenever the route can reasonably avoid it.
+# {dest_key: [(start_str, end_str), ...]} ? a dest can have more than one
+# avoid-window if ever needed, though normally just one.  Separate from
+# PLANT_RECEIVING_WINDOWS: a dest can be open the whole time and still carry
+# an avoid-window inside that open period.
+AVOID_WINDOWS = {
+    "972712": [("19:00", "22:00")],  # Saputo Abbotsford ? shared dock, another
+                                       # division needs 7-10pm
 }
 
 # Tray uses the same columns plus a "From Route" column
@@ -469,6 +482,31 @@ def mins_to_time(start_time, offset_mins):
 def fmt_hhmm(t):
     if t is None: return "-"
     return f"{t.hour:02d}:{t.minute:02d}"
+
+def _continuous_minutes(t, start_time):
+    """Convert a wall-clock datetime.time to minutes since the reference
+    midnight of the day a sheet's route starts on, adding 24h if t is
+    clearly "earlier" than the sheet's own start time ? which can only mean
+    it's actually the next calendar day (a route running into overtime past
+    midnight).  Used to lay out arrival/departure times on one continuous,
+    shared axis for the processor schedule chart.
+    """
+    if t is None or start_time is None:
+        return None
+    base_min = start_time.hour * 60 + start_time.minute
+    t_min    = t.hour * 60 + t.minute
+    if t_min < base_min - 60:   # more than an hour "before" start -> wrapped
+        t_min += 24 * 60
+    return t_min
+
+def _min_to_hhmm(m):
+    """Format continuous minutes back to a real wall-clock HH:MM (wraps at
+    24h, since this is for display of an actual clock time, not the
+    internal chart coordinate)."""
+    if m is None:
+        return "-"
+    m = int(m) % (24 * 60)
+    return f"{m // 60:02d}:{m % 60:02d}"
 
 def day_colour_style(day_colour):
     """Return (bg QColor, fg QColor, display_text) for a day colour string."""
@@ -2395,8 +2433,16 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
     plant_margin_mins   = cfg.get("plant_win_margin_mins", 30.0)
     plant_margin_rate   = cfg.get("plant_win_margin_rate",
                                   plant_win_rate * 0.5)                # km per hour inside margin
+    # Avoid-windows: a flat penalty for arriving at a dest during a window
+    # where the dock is wanted by another truck/division, even though the
+    # plant itself is open.  Independent of the open/close check above ? a
+    # dest can have no plant_windows entry at all and still carry an
+    # avoid-window, or vice versa.
+    avoid_windows       = cfg.get("avoid_windows", AVOID_WINDOWS)
+    avoid_win_rate       = cfg.get("avoid_window_penalty", 0.0)
     plant_win_cost = 0.0
-    if plant_windows and start_time and all_times:
+    avoid_win_cost = 0.0
+    if (plant_windows or avoid_windows) and start_time and all_times:
         for b_idx3, block3 in enumerate(blocks):
             btimes3 = all_times[b_idx3] if b_idx3 < len(all_times) else None
             if not btimes3:
@@ -2411,10 +2457,10 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
                 if "yard for" in (dest_d3.get("name","") or "").lower():
                     continue
                 dk3 = normalise_key(dest_d3.get("key", "") or "")
-                window3 = plant_windows.get(dk3)
-                if window3 is None:
+                window3     = plant_windows.get(dk3)
+                avoid_list3 = avoid_windows.get(dk3)
+                if window3 is None and not avoid_list3:
                     continue
-                open_str3, close_str3 = window3
                 if block3.get("preload"):
                     t_idx3 = 1
                 else:
@@ -2424,35 +2470,45 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
                     continue
                 arr3     = ft3["arr"]
                 arr_dt3  = datetime.combine(date.today(), arr3)
-                close_t3 = parse_hhmm(close_str3)
-                open_t3  = parse_hhmm(open_str3)
 
-                if not time_in_window(arr3, open_str3, close_str3):
-                    # Outside window ? penalise by hours until next open
-                    if open_t3 is not None:
-                        open_dt3 = datetime.combine(date.today(), open_t3)
-                        if open_t3 > arr3:
-                            wait_h = (open_dt3 - arr_dt3).total_seconds() / 3600.0
+                if window3 is not None:
+                    open_str3, close_str3 = window3
+                    close_t3 = parse_hhmm(close_str3)
+                    open_t3  = parse_hhmm(open_str3)
+
+                    if not time_in_window(arr3, open_str3, close_str3):
+                        # Outside window ? penalise by hours until next open
+                        if open_t3 is not None:
+                            open_dt3 = datetime.combine(date.today(), open_t3)
+                            if open_t3 > arr3:
+                                wait_h = (open_dt3 - arr_dt3).total_seconds() / 3600.0
+                            else:
+                                open_dt3 += timedelta(days=1)
+                                wait_h = (open_dt3 - arr_dt3).total_seconds() / 3600.0
+                            plant_win_cost += wait_h * plant_win_rate
                         else:
-                            open_dt3 += timedelta(days=1)
-                            wait_h = (open_dt3 - arr_dt3).total_seconds() / 3600.0
-                        plant_win_cost += wait_h * plant_win_rate
-                    else:
-                        plant_win_cost += 1.0 * plant_win_rate   # flat 1-hour penalty
-                elif plant_margin_mins > 0 and close_t3 is not None and plant_margin_rate > 0:
-                    close_dt3 = datetime.combine(date.today(), close_t3)
-                    if open_t3 is not None and close_t3 < open_t3:
-                        close_dt3 += timedelta(days=1)
-                    mins_to_close = (close_dt3 - arr_dt3).total_seconds() / 60.0
-                    if mins_to_close < 0:
-                        close_dt3 += timedelta(days=1)
+                            plant_win_cost += 1.0 * plant_win_rate   # flat 1-hour penalty
+                    elif plant_margin_mins > 0 and close_t3 is not None and plant_margin_rate > 0:
+                        close_dt3 = datetime.combine(date.today(), close_t3)
+                        if open_t3 is not None and close_t3 < open_t3:
+                            close_dt3 += timedelta(days=1)
                         mins_to_close = (close_dt3 - arr_dt3).total_seconds() / 60.0
-                    if mins_to_close < plant_margin_mins:
-                        depth = (plant_margin_mins - mins_to_close) / plant_margin_mins
-                        # depth * margin expressed as hours * rate
-                        plant_win_cost += depth * plant_margin_rate * (plant_margin_mins / 60.0)
+                        if mins_to_close < 0:
+                            close_dt3 += timedelta(days=1)
+                            mins_to_close = (close_dt3 - arr_dt3).total_seconds() / 60.0
+                        if mins_to_close < plant_margin_mins:
+                            depth = (plant_margin_mins - mins_to_close) / plant_margin_mins
+                            # depth * margin expressed as hours * rate
+                            plant_win_cost += depth * plant_margin_rate * (plant_margin_mins / 60.0)
 
-    return total_km + milking_equiv + vol_pen + shift_pen + shift_hours_cost + cap_pen + plant_win_cost
+                if avoid_list3 and avoid_win_rate > 0:
+                    for (av_start3, av_end3) in avoid_list3:
+                        if time_in_window(arr3, av_start3, av_end3):
+                            avoid_win_cost += avoid_win_rate
+                            break   # one flat hit per stop even if windows overlap
+
+    return (total_km + milking_equiv + vol_pen + shift_pen + shift_hours_cost
+            + cap_pen + plant_win_cost + avoid_win_cost)
 
 
 def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
@@ -2555,8 +2611,11 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
     plant_win_rate    = cfg.get("plant_win_penalty", 200.0)
     plant_margin_mins = cfg.get("plant_win_margin_mins", 30.0)
     plant_margin_rate = cfg.get("plant_win_margin_rate", plant_win_rate * 0.5)
+    avoid_windows     = cfg.get("avoid_windows", AVOID_WINDOWS)
+    avoid_win_rate    = cfg.get("avoid_window_penalty", 0.0)
     plant_win_cost    = 0.0
-    if plant_windows and all_times:
+    avoid_win_cost    = 0.0
+    if (plant_windows or avoid_windows) and all_times:
         for b_idx3, block3 in enumerate(blocks):
             btimes3 = all_times[b_idx3] if b_idx3 < len(all_times) else None
             if not btimes3: continue
@@ -2567,35 +2626,45 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
             for d_i3, dest_d3 in enumerate(dests3):
                 if "yard for" in (dest_d3.get("name","") or "").lower(): continue
                 dk3 = normalise_key(dest_d3.get("key","") or "")
-                window3 = plant_windows.get(dk3)
-                if not window3: continue
-                open_str3, close_str3 = window3
+                window3     = plant_windows.get(dk3)
+                avoid_list3 = avoid_windows.get(dk3)
+                if window3 is None and not avoid_list3:
+                    continue
                 t_idx3 = (1 if block3.get("preload")
                           else _dest_stop_index(block3, d_i3, b_idx3, blocks))
                 ft3 = btimes3[t_idx3] if t_idx3 < len(btimes3) else None
                 if ft3 is None or ft3.get("arr") is None: continue
                 arr3 = ft3["arr"]
                 arr_dt3 = datetime.combine(date.today(), arr3)
-                open_t3 = parse_hhmm(open_str3)
-                if not time_in_window(arr3, open_str3, close_str3):
-                    if open_t3:
-                        open_dt3 = datetime.combine(date.today(), open_t3)
-                        if open_t3 <= arr3: open_dt3 += timedelta(days=1)
-                        plant_win_cost += (open_dt3 - arr_dt3).total_seconds()/3600.0 * plant_win_rate
+
+                if window3 is not None:
+                    open_str3, close_str3 = window3
+                    open_t3 = parse_hhmm(open_str3)
+                    if not time_in_window(arr3, open_str3, close_str3):
+                        if open_t3:
+                            open_dt3 = datetime.combine(date.today(), open_t3)
+                            if open_t3 <= arr3: open_dt3 += timedelta(days=1)
+                            plant_win_cost += (open_dt3 - arr_dt3).total_seconds()/3600.0 * plant_win_rate
+                        else:
+                            plant_win_cost += plant_win_rate
                     else:
-                        plant_win_cost += plant_win_rate
-                else:
-                    close_t3 = parse_hhmm(close_str3)
-                    if close_t3:
-                        close_dt3 = datetime.combine(date.today(), close_t3)
-                        if open_t3 and close_t3 < open_t3: close_dt3 += timedelta(days=1)
-                        mtc = (close_dt3 - arr_dt3).total_seconds()/60.0
-                        if mtc < 0:
-                            close_dt3 += timedelta(days=1)
+                        close_t3 = parse_hhmm(close_str3)
+                        if close_t3:
+                            close_dt3 = datetime.combine(date.today(), close_t3)
+                            if open_t3 and close_t3 < open_t3: close_dt3 += timedelta(days=1)
                             mtc = (close_dt3 - arr_dt3).total_seconds()/60.0
-                        if mtc < plant_margin_mins:
-                            depth = (plant_margin_mins - mtc) / plant_margin_mins
-                            plant_win_cost += depth * plant_margin_rate * (plant_margin_mins / 60.0)
+                            if mtc < 0:
+                                close_dt3 += timedelta(days=1)
+                                mtc = (close_dt3 - arr_dt3).total_seconds()/60.0
+                            if mtc < plant_margin_mins:
+                                depth = (plant_margin_mins - mtc) / plant_margin_mins
+                                plant_win_cost += depth * plant_margin_rate * (plant_margin_mins / 60.0)
+
+                if avoid_list3 and avoid_win_rate > 0:
+                    for (av_start3, av_end3) in avoid_list3:
+                        if time_in_window(arr3, av_start3, av_end3):
+                            avoid_win_cost += avoid_win_rate
+                            break
 
     return {
         "km":        total_km,
@@ -2604,7 +2673,9 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
         "overtime":  shift_pen,
         "cap":       cap_pen,
         "plant_win": plant_win_cost,
-        "total":     total_km + milking_equiv + shift_cost + shift_pen + cap_pen + plant_win_cost,
+        "avoid_win": avoid_win_cost,
+        "total":     total_km + milking_equiv + shift_cost + shift_pen + cap_pen
+                     + plant_win_cost + avoid_win_cost,
     }
 
 
@@ -2649,7 +2720,7 @@ def _optimize_split_positions(blocks, dm, start_time, cfg, dm_dur=None):
 
 def _sheet_cost_breakdown_state(state, dm, cache, fname, cfg, dm_dur=None):
     """Aggregate _sheet_cost_breakdown across all sheets in a solver state."""
-    totals = {"km":0.0,"milking":0.0,"shift":0.0,"overtime":0.0,"cap":0.0,"plant_win":0.0,"total":0.0}
+    totals = {"km":0.0,"milking":0.0,"shift":0.0,"overtime":0.0,"cap":0.0,"plant_win":0.0,"avoid_win":0.0,"total":0.0}
     for sname, blocks in state:
         entry = cache.get(fname, {}).get(sname, {})
         st    = entry.get("start_time") if isinstance(entry, dict) else None
@@ -3453,6 +3524,8 @@ class ALNSSolver(QThread):
         plant_win_rate      = self.cfg.get("plant_win_penalty", 500.0)
         plant_margin_mins   = self.cfg.get("plant_win_margin_mins", 30.0)
         plant_margin_rate   = self.cfg.get("plant_win_margin_rate", plant_win_rate * 0.5)
+        avoid_windows       = self.cfg.get("avoid_windows", AVOID_WINDOWS)
+        avoid_win_rate      = self.cfg.get("avoid_window_penalty", 0.0)
 
         def _attach_cost(s2, b2, dests_list):
             """Cost of giving dests_list to block (s2,b2), using correct block origin."""
@@ -3500,9 +3573,10 @@ class ALNSSolver(QThread):
 
             # Plant window penalty ? skip for yard-for destinations (24/7 parking)
             win_pen = 0.0
+            avoid_pen = 0.0
             is_yard_dests = all("yard for" in (d.get("name","") or "").lower()
                                 for d in dests_list if d.get("name"))
-            if plant_windows and not is_yard_dests:
+            if (plant_windows or avoid_windows) and not is_yard_dests:
                 sname_s2 = state[s2][0]
                 entry_s2 = self.cache.get(self.fname, {}).get(sname_s2, {})
                 st_s2    = entry_s2.get("start_time") if isinstance(entry_s2, dict) else None
@@ -3516,34 +3590,43 @@ class ALNSSolver(QThread):
                             break
                         cursor += timedelta(minutes=(leg / DRIVE_SPEED_KMH) * 60.0)
                         stop = stops[i + 1]
-                        dk_stop = normalise_key(stop)
-                        window = plant_windows.get(dk_stop)
-                        if window is None:
+                        dk_stop     = normalise_key(stop)
+                        window      = plant_windows.get(dk_stop)
+                        avoid_list  = avoid_windows.get(dk_stop)
+                        if window is None and not avoid_list:
                             continue
                         arr_t = cursor.time()
-                        if not time_in_window(arr_t, window[0], window[1]):
-                            open_t = parse_hhmm(window[0])
-                            if open_t:
-                                open_dt = datetime.combine(date.today(), open_t)
-                                if open_t <= arr_t:
-                                    open_dt += timedelta(days=1)
-                                wait_h = (open_dt - cursor).total_seconds() / 3600.0
-                            else:
-                                wait_h = 1.0
-                            win_pen += wait_h * plant_win_rate
-                        elif plant_margin_mins > 0 and plant_margin_rate > 0:
-                            close_t = parse_hhmm(window[1])
-                            if close_t:
-                                close_dt = datetime.combine(date.today(), close_t)
-                                open_t2 = parse_hhmm(window[0])
-                                if open_t2 and close_t < open_t2:
-                                    close_dt += timedelta(days=1)
-                                mins_to_close = (close_dt - cursor).total_seconds() / 60.0
-                                if 0 < mins_to_close < plant_margin_mins:
-                                    depth = (plant_margin_mins - mins_to_close) / plant_margin_mins
-                                    win_pen += depth * plant_margin_rate * (plant_margin_mins / 60.0)
 
-            return leg_km + vol_pen + win_pen
+                        if window is not None:
+                            if not time_in_window(arr_t, window[0], window[1]):
+                                open_t = parse_hhmm(window[0])
+                                if open_t:
+                                    open_dt = datetime.combine(date.today(), open_t)
+                                    if open_t <= arr_t:
+                                        open_dt += timedelta(days=1)
+                                    wait_h = (open_dt - cursor).total_seconds() / 3600.0
+                                else:
+                                    wait_h = 1.0
+                                win_pen += wait_h * plant_win_rate
+                            elif plant_margin_mins > 0 and plant_margin_rate > 0:
+                                close_t = parse_hhmm(window[1])
+                                if close_t:
+                                    close_dt = datetime.combine(date.today(), close_t)
+                                    open_t2 = parse_hhmm(window[0])
+                                    if open_t2 and close_t < open_t2:
+                                        close_dt += timedelta(days=1)
+                                    mins_to_close = (close_dt - cursor).total_seconds() / 60.0
+                                    if 0 < mins_to_close < plant_margin_mins:
+                                        depth = (plant_margin_mins - mins_to_close) / plant_margin_mins
+                                        win_pen += depth * plant_margin_rate * (plant_margin_mins / 60.0)
+
+                        if avoid_list and avoid_win_rate > 0:
+                            for (av_s, av_e) in avoid_list:
+                                if time_in_window(arr_t, av_s, av_e):
+                                    avoid_pen += avoid_win_rate
+                                    break
+
+            return leg_km + vol_pen + win_pen + avoid_pen
 
         # flat list of all (s_idx, b_idx) slots
         all_slots = [(s_idx, b_idx)
@@ -4805,6 +4888,217 @@ class IRMALookupDialog(QDialog):
             self.navigate_requested.emit(h["fname"], h["sname"])
 
 
+class ProcessorScheduleWidget(QWidget):
+    """Paints a Gantt-style chart: processors on the Y axis, time of day on
+    the X axis, and a coloured box for every truck's visit (arrival to
+    departure).  Boxes that overlap another truck at the same processor are
+    drawn with a bold red border.  Any configured avoid-window for that
+    processor is shaded behind the boxes on its row.
+
+    visits: list of dicts {dest_key, dest_name, sname, colour, arr_min, dep_min}
+            arr_min/dep_min are continuous minutes since a shared reference
+            midnight (see _continuous_minutes) ? not wrapped at 24h, so two
+            trucks visiting at the same real clock time always line up at
+            the same X position even if one route's day technically started
+            "yesterday" relative to the other's wrap point.
+    """
+    PX_PER_MIN    = 4
+    ROW_HEIGHT    = 32
+    LABEL_WIDTH   = 230
+    HEADER_HEIGHT = 28
+    TOP_MARGIN    = 14
+
+    def __init__(self, visits, avoid_windows, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self._boxes = []   # [((x,y,w,h), visit_dict), ...] for hit-testing
+        self._avoid_windows = avoid_windows or {}
+        self._build(visits)
+
+    def _build(self, visits):
+        by_proc = {}
+        for v in visits:
+            by_proc.setdefault(v["dest_key"], []).append(v)
+        # Sort processors alphabetically by display name for predictable lookup
+        self._procs = sorted(by_proc.items(),
+                             key=lambda kv: kv[1][0]["dest_name"].lower())
+
+        # Overlap detection: within each processor's own visits, sorted by
+        # arrival, flag any pair whose intervals intersect.
+        for _dk, vs in self._procs:
+            vs.sort(key=lambda v: v["arr_min"])
+            for i in range(len(vs)):
+                for j in range(i + 1, len(vs)):
+                    if vs[j]["arr_min"] >= vs[i]["dep_min"]:
+                        break
+                    vs[i]["overlap"] = True
+                    vs[j]["overlap"] = True
+
+        all_mins = [v["arr_min"] for _dk, vs in self._procs for v in vs] + \
+                   [v["dep_min"] for _dk, vs in self._procs for v in vs]
+        if all_mins:
+            self._t_min = max(0, (min(all_mins) // 60) * 60 - 30)
+            self._t_max = (max(all_mins) // 60 + 1) * 60 + 30
+        else:
+            self._t_min, self._t_max = 0, 24 * 60
+
+        n_rows = max(1, len(self._procs))
+        w = self.LABEL_WIDTH + int((self._t_max - self._t_min) * self.PX_PER_MIN) + 20
+        h = self.HEADER_HEIGHT + self.TOP_MARGIN + n_rows * self.ROW_HEIGHT + 10
+        self.setMinimumSize(w, h)
+
+    def _x_for(self, minute):
+        return self.LABEL_WIDTH + int((minute - self._t_min) * self.PX_PER_MIN)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        self._boxes = []
+
+        font_label = QFont("Calibri", 9)
+        font_axis  = QFont("Calibri", 8)
+
+        if not self._procs:
+            painter.setFont(QFont("Calibri", 11))
+            painter.drawText(20, 30, "No processor visits found for this file.")
+            return
+
+        chart_top    = self.HEADER_HEIGHT + self.TOP_MARGIN
+        chart_bottom = chart_top + len(self._procs) * self.ROW_HEIGHT
+        chart_right  = self._x_for(self._t_max)
+
+        # -- hour gridlines + axis labels --------------------------------
+        painter.setFont(font_axis)
+        t = (self._t_min // 60) * 60
+        while t <= self._t_max:
+            x = self._x_for(t)
+            painter.setPen(QPen(QColor("#dddddd"), 1))
+            painter.drawLine(x, chart_top, x, chart_bottom)
+            painter.setPen(QPen(QColor("#555555"), 1))
+            hh = (t // 60) % 24
+            mm = t % 60
+            painter.drawText(x + 2, chart_top - 6, 60, 16, Qt.AlignLeft, f"{hh:02d}:{mm:02d}")
+            t += 60
+
+        # -- avoid-window shading (behind the visit boxes) ---------------
+        for row_i, (dk, _vs) in enumerate(self._procs):
+            row_top = chart_top + row_i * self.ROW_HEIGHT
+            for (av_start, av_end) in self._avoid_windows.get(dk, []):
+                av_s_min = _hhmm_minutes(av_start)
+                av_e_min = _hhmm_minutes(av_end)
+                if av_s_min is None or av_e_min is None:
+                    continue
+                base = (self._t_min // (24 * 60)) * (24 * 60)
+                for day_off in (0, 24 * 60):
+                    s = base + day_off + av_s_min
+                    e = base + day_off + av_e_min
+                    if e <= self._t_min or s >= self._t_max:
+                        continue
+                    x1 = self._x_for(max(s, self._t_min))
+                    x2 = self._x_for(min(e, self._t_max))
+                    painter.fillRect(x1, row_top, max(1, x2 - x1), self.ROW_HEIGHT,
+                                     QColor(244, 67, 54, 45))
+
+        # -- row separators, labels, visit boxes --------------------------
+        for row_i, (dk, vs) in enumerate(self._procs):
+            row_top = chart_top + row_i * self.ROW_HEIGHT
+            painter.setPen(QPen(QColor("#eeeeee"), 1))
+            painter.drawLine(0, row_top, chart_right, row_top)
+
+            painter.setFont(font_label)
+            painter.setPen(QPen(QColor("#222222"), 1))
+            dest_name = vs[0]["dest_name"]
+            painter.drawText(8, row_top, self.LABEL_WIDTH - 16, self.ROW_HEIGHT,
+                            Qt.AlignVCenter | Qt.AlignLeft, dest_name)
+
+            for v in vs:
+                x1 = self._x_for(v["arr_min"])
+                x2 = self._x_for(v["dep_min"])
+                bw = max(3, x2 - x1)
+                by = row_top + 4
+                bh = self.ROW_HEIGHT - 8
+                bg, fg, _ = day_colour_style(v.get("colour", ""))
+                if bg is None:
+                    bg = QColor("#90a4ae")
+                    fg = QColor("#ffffff")
+                painter.setBrush(bg)
+                if v.get("overlap"):
+                    painter.setPen(QPen(QColor("#d32f2f"), 3))
+                else:
+                    painter.setPen(QPen(QColor("#37474f"), 1))
+                painter.drawRoundedRect(x1, by, bw, bh, 3, 3)
+                self._boxes.append(((x1, by, bw, bh), v))
+
+                if bw > 36:
+                    painter.setPen(QPen(fg, 1))
+                    painter.setFont(font_label)
+                    painter.drawText(x1 + 3, by, bw - 6, bh,
+                                    Qt.AlignVCenter | Qt.AlignLeft, v["sname"])
+
+        painter.setPen(QPen(QColor("#cccccc"), 1))
+        painter.drawLine(0, chart_bottom, chart_right, chart_bottom)
+
+    def mouseMoveEvent(self, event):
+        pos = event.pos()
+        for (x, y, w, h), v in self._boxes:
+            if x <= pos.x() <= x + w and y <= pos.y() <= y + h:
+                txt = (f"{v['dest_name']}\n{v['sname']}\n"
+                      f"{_min_to_hhmm(v['arr_min'])} - {_min_to_hhmm(v['dep_min'])}")
+                if v.get("overlap"):
+                    txt += "\n** overlaps another truck at this dock **"
+                QToolTip.showText(event.globalPos(), txt, self)
+                return
+        QToolTip.hideText()
+
+    def leaveEvent(self, _event):
+        QToolTip.hideText()
+
+
+def _hhmm_minutes(s):
+    """HH:MM string -> minutes since midnight, or None if unparseable."""
+    t = parse_hhmm(s)
+    if t is None:
+        return None
+    return t.hour * 60 + t.minute
+
+
+class ProcessorScheduleDialog(QDialog):
+    """Shows every truck's visit to every processor across the currently
+    loaded file as a Gantt-style chart, built from whatever blocks are
+    currently active (solver output if present, original parse otherwise).
+    """
+
+    def __init__(self, visits, avoid_windows, fname, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Processor Schedule ? {fname}")
+        self.setMinimumSize(900, 600)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        legend = QLabel(
+            "Each box is one truck's time at a processor (arrival to departure). "
+            "Thick red border = overlaps another truck at the same dock. "
+            "Pink shading = a configured avoid-window for that processor. "
+            "Hover a box for details.")
+        legend.setWordWrap(True)
+        layout.addWidget(legend)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        self._chart = ProcessorScheduleWidget(visits, avoid_windows)
+        scroll.setWidget(self._chart)
+        layout.addWidget(scroll)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        close_row.addWidget(close_btn)
+        layout.addLayout(close_row)
+
+
 # -- Main window ---------------------------------------------------------------
 
 class MainWindow(QMainWindow):
@@ -5370,6 +5664,22 @@ class MainWindow(QMainWindow):
             "Default 250 with 30-min margin = max 7,500 penalty at closing.")
         obj_l.addWidget(spin_row("Margin rate", self._sw_plant_margin_rate, "/min"))
 
+        self._sw_avoid_win_pen = QDoubleSpinBox()
+        self._sw_avoid_win_pen.setRange(0.0, 10000.0)
+        self._sw_avoid_win_pen.setSingleStep(50.0)
+        self._sw_avoid_win_pen.setValue(0.0)
+        self._sw_avoid_win_pen.setDecimals(0)
+        self._sw_avoid_win_pen.setToolTip(
+            "Flat penalty for arriving at a dest during one of its configured\n"
+            "avoid-windows (currently: Saputo Abbotsford / 972712, 7-10pm ?\n"
+            "another division needs that dock during this slot).\n"
+            "Expressed as km-equivalent, same scale as routing distance.\n"
+            "Applies even though the plant is otherwise open during this time ?\n"
+            "independent of the receiving-window penalty above.\n"
+            "Set to 0 to disable (default) ? the solver will not try to avoid\n"
+            "the window at all until this is raised above 0.")
+        obj_l.addWidget(spin_row("Avoid-window pen", self._sw_avoid_win_pen, "km flat"))
+
         obj_l.addStretch()
         top_l.addWidget(obj_box)
 
@@ -5758,6 +6068,19 @@ class MainWindow(QMainWindow):
         cost_report_btn.clicked.connect(self._on_full_cost_report)
         trl.addWidget(cost_report_btn)
 
+        proc_sched_btn = QPushButton("Processor Schedule")
+        proc_sched_btn.setFixedHeight(24)
+        proc_sched_btn.setStyleSheet(
+            "QPushButton { background:#00695c; color:white; font-weight:bold; "
+            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
+        proc_sched_btn.setToolTip(
+            "Visual chart: every truck's arrival-to-departure time at every\n"
+            "processor across the loaded file, on one shared time axis.\n"
+            "Highlights overlapping trucks at the same dock and shows any\n"
+            "configured avoid-windows.")
+        proc_sched_btn.clicked.connect(self._on_processor_schedule)
+        trl.addWidget(proc_sched_btn)
+
         overtime_btn = QPushButton("Overtime Timeline")
         overtime_btn.setFixedHeight(24)
         overtime_btn.setStyleSheet(
@@ -5816,6 +6139,98 @@ class MainWindow(QMainWindow):
 
         self.tabs.addTab(debug_tab, "Debug")
 
+    def _collect_processor_schedule(self):
+        """Build a list of processor visits across every sheet in the
+        loaded file, using whatever blocks are currently active (solver
+        output in self._sheet_mods if present, else the original parse).
+
+        Returns list of dicts: {dest_key, dest_name, sname, colour,
+        arr_min, dep_min} where arr_min/dep_min are continuous minutes on
+        a shared axis (see _continuous_minutes) so every truck's visit
+        lines up correctly regardless of which sheet it came from.
+        """
+        fname = self.file_cb.currentText()
+        visits = []
+        if not fname or fname not in self._cache:
+            return visits
+        suppress = self._suppress_no_milking_cb.isChecked() \
+            if hasattr(self, "_suppress_no_milking_cb") else True
+
+        for sname in sorted(self._cache[fname].keys()):
+            entry = self._cache[fname].get(sname)
+            if not isinstance(entry, dict):
+                continue
+            start_time = entry.get("start_time")
+            if not start_time:
+                continue
+            colour = entry.get("day_colour", "")
+            key    = (fname, sname)
+            blocks = self._sheet_mods.get(key, entry.get("blocks", []))
+
+            ct = calc_times(blocks, self.dm, start_time, self.dm_dur,
+                            suppress_no_milking=suppress)
+            if ct is None:
+                continue
+            all_times, _ = ct
+
+            for b_idx, block in enumerate(blocks):
+                btimes = all_times[b_idx] if b_idx < len(all_times) else None
+                if not btimes:
+                    continue
+                dests = block.get("dests") or []
+                if not dests:
+                    dk0 = block.get("dest_key", "")
+                    dn0 = block.get("dest_name", "") or dk0
+                    dests = [{"key": dk0, "name": dn0}] if dk0 else []
+                for d_i, dest_d in enumerate(dests):
+                    dn = (dest_d.get("name", "") or "").strip()
+                    if "yard for" in dn.lower():
+                        continue   # overnight parking, not a real processor visit
+                    dk = normalise_key(dest_d.get("key", "") or "")
+                    if not dk:
+                        continue
+                    t_idx = _dest_stop_index(block, d_i, b_idx, blocks)
+                    ft = btimes[t_idx] if t_idx < len(btimes) else None
+                    if ft is None or ft.get("arr") is None or ft.get("dep") is None:
+                        continue
+                    arr_m = _continuous_minutes(ft["arr"], start_time)
+                    dep_m = _continuous_minutes(ft["dep"], start_time)
+                    if dep_m < arr_m:   # the dwell itself wrapped past midnight
+                        dep_m += 24 * 60
+                    visits.append({
+                        "dest_key":  dk,
+                        "dest_name": dn or dk,
+                        "sname":     sname,
+                        "colour":    colour,
+                        "arr_min":   arr_m,
+                        "dep_min":   dep_m,
+                    })
+        return visits
+
+    def _on_processor_schedule(self):
+        """Open the Processor Schedule chart for the currently loaded file."""
+        try:
+            self._on_processor_schedule_inner()
+        except Exception:
+            import traceback
+            self._debug_text.setPlainText(
+                f"Processor Schedule crashed:\n{traceback.format_exc()}")
+
+    def _on_processor_schedule_inner(self):
+        fname = self.file_cb.currentText()
+        if not fname or fname not in self._cache:
+            QMessageBox.information(self, "Processor Schedule", "No file loaded.")
+            return
+        visits = self._collect_processor_schedule()
+        if not visits:
+            QMessageBox.information(
+                self, "Processor Schedule",
+                "No processor visits with usable arrival/departure times "
+                "were found for this file.")
+            return
+        dlg = ProcessorScheduleDialog(visits, AVOID_WINDOWS, fname, parent=self)
+        dlg.exec_()
+
     def _on_full_cost_report(self):
         """Full cost breakdown for every route ? uses same logic as solver via _sheet_cost_breakdown."""
         fname = self.file_cb.currentText()
@@ -5826,6 +6241,7 @@ class MainWindow(QMainWindow):
             "plant_win_penalty":     self._sw_plant_win_pen.value(),
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
+            "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
@@ -5862,7 +6278,8 @@ class MainWindow(QMainWindow):
             lines.append(f"\n{sname}{tag}{split_tag}  total={bd['total']:.1f}"
                          f"  km={bd['km']:.1f}  milk={bd['milking']:.1f}"
                          f"  shift={bd['shift']:.1f}  ot={bd['overtime']:.1f}"
-                         f"  cap={bd['cap']:.1f}  pw={bd['plant_win']:.1f}")
+                         f"  cap={bd['cap']:.1f}  pw={bd['plant_win']:.1f}  "
+                         f"avoid={bd['avoid_win']:.1f}")
             if not frozen:   # frozen routes are irreducible ? exclude from grand total
                 for k in grand:
                     grand[k] += bd.get(k, 0.0)
@@ -6146,6 +6563,7 @@ class MainWindow(QMainWindow):
             "plant_win_penalty":     self._sw_plant_win_pen.value(),
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
+            "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
@@ -6409,6 +6827,7 @@ class MainWindow(QMainWindow):
             "plant_win_penalty":  self._sw_plant_win_pen.value(),
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
+            "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
             "suppress_no_milking": self._suppress_no_milking_cb.isChecked(),
         }
         plant_windows     = cfg.get("plant_windows", {})
@@ -7623,6 +8042,7 @@ class MainWindow(QMainWindow):
             "plant_win_penalty":     self._sw_plant_win_pen.value(),
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
+            "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
@@ -7697,6 +8117,7 @@ class MainWindow(QMainWindow):
             "plant_win_penalty":  self._sw_plant_win_pen.value(),
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
+            "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
             "plant_windows":      plant_windows,
             "iterations":         self._sw_iters.value(),
             "target_cool_frac":   self._sw_cool.value(),
@@ -8235,6 +8656,7 @@ class MainWindow(QMainWindow):
             "plant_win_penalty":     self._sw_plant_win_pen.value(),
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
+            "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
