@@ -1009,6 +1009,19 @@ def parse_sheet(ws, ws_formula=None):
                 "edpu":         ws.cell(r, C_EDPU).value or "",
                 "location":     ws.cell(r, C_LOCATION).value or "",
                 "prior_vol":    _cell(r, C_PRIOR_VOL),
+                # Farms in NO_MILKING_WINDOW_FARMS are exempt from milking
+                # window checks everywhere, but several different functions
+                # (calc_times, _sheet_cost, _sheet_cost_breakdown, the table
+                # display) each separately re-check IRMA membership gated by
+                # a suppress_no_milking flag that has to be correctly threaded
+                # through every call site.  That's fragile ? miss one call
+                # site and the farm isn't actually exempt there.  Setting
+                # _mwo=True here instead means every one of those places
+                # picks up the exemption automatically through the single,
+                # already-correct MWO mechanism, with no separate threading
+                # needed.  The checkbox shows as ticked in the UI immediately
+                # on load, matching what's actually happening internally.
+                "_mwo":         val0.strip() in NO_MILKING_WINDOW_FARMS,
                 "_extra_cells": extras,
             })
     # Mark any remaining zero-farm blocks with a dest as preload
@@ -7422,15 +7435,36 @@ class MainWindow(QMainWindow):
                         # crashing, but writing None would silently drop the
                         # label ? so write it through as plain text instead
                         # of trying to parse it as a time.
+                        #
+                        # Number format: always force "h:mm;@" on these four
+                        # columns at write time, regardless of whatever format
+                        # the cell already had.  Cells revealed by splitting a
+                        # wide ROBOT merge, or newly inserted rows whose
+                        # template happened to be a ROBOT row, can carry
+                        # number_format="General" (confirmed on a real file ?
+                        # the cell was hidden under the merge and never needed
+                        # a time format before).  Writing a real time value
+                        # into a General-formatted cell makes Excel fall back
+                        # to a long default time display ("10:00:00 AM"),
+                        # which often doesn't fit the column and renders as
+                        # "####".  "h:mm;@" is the format every normal time
+                        # cell on the sheet already uses ? it displays a real
+                        # time compactly as "10:00" and the "@" component lets
+                        # the same format hold literal text (e.g. "ROBOT")
+                        # without breaking, so it's safe to apply universally
+                        # rather than only when we can find a good donor cell.
                         if str(fd.get("m1_start", "")).strip().upper() == "ROBOT":
                             _write_cell(ws_row, C_M1_START, "ROBOT")
+                            ws.cell(ws_row, C_M1_START).number_format = "h:mm;@"
                             for col in (C_M1_FINISH, C_M2_START, C_M2_FINISH):
                                 _write_cell(ws_row, col, None)
+                                ws.cell(ws_row, col).number_format = "h:mm;@"
                         else:
                             for col, fkey in [(C_M1_START,"m1_start"),(C_M1_FINISH,"m1_finish"),
                                               (C_M2_START,"m2_start"),(C_M2_FINISH,"m2_finish")]:
                                 raw = fd.get(fkey, "")
                                 _write_cell(ws_row, col, parse_hhmm(raw) if raw else None)
+                                ws.cell(ws_row, col).number_format = "h:mm;@"
                         extras = fd.get("_extra_cells") or {}
                         for col in extra_cols_in_use:
                             _write_cell(ws_row, col, extras.get(col))
