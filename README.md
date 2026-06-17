@@ -1,6 +1,8 @@
-current ver: viewer179
+current ver: viewer180
 
 ver history
+
+180: sheet loading fixes 
 
 179: export fixes
 
