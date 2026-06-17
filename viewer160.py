@@ -18,6 +18,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray
 from PyQt5.QtGui import QFont, QColor, QDrag, QPainter, QPen
 
 import openpyxl
+from openpyxl.styles import Font, Border, Side
 
 # -- Logging -------------------------------------------------------------------
 # Module logger. A NullHandler keeps libraries quiet by default; main() attaches
@@ -2190,9 +2191,17 @@ def _group_dest_catalogue(sheets):
     return cat
 
 
-def _sheet_cost(blocks, dm, start_time, cfg):
+def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
     """
     Scalar cost for one truck's day (one sheet's worth of blocks).
+
+    dm_dur: optional duration-matrix lookup (minutes between nodes).  When
+    supplied, calc_times uses real recorded travel durations for legs that
+    have data, falling back to the flat-speed distance estimate only for
+    legs missing duration data.  Without it (dm_dur=None, the default), every
+    leg uses the flat-speed estimate ? this is what every caller did before
+    duration data was wired into the solver, so omitting dm_dur preserves
+    old behaviour exactly.
 
     cfg keys used:
       orig_dest_vols  ? {dest_key: original_litres}  (group-wide)
@@ -2203,6 +2212,10 @@ def _sheet_cost(blocks, dm, start_time, cfg):
       shift_penalty   ? penalty per hour over max_shift_h
     """
     # -- distance --------------------------------------------------------------
+    # NOTE: total_km is the literal distance driven ? a separate cost axis from
+    # travel TIME (fuel/wear vs schedule).  It deliberately stays distance-based
+    # even when dm_dur is supplied; only the TIME-derived components below
+    # (shift_hours, milking wait, plant-window arrival) use real durations.
     total_km  = 0.0
     all_dists = calc_distances(blocks, dm)
     for dists in all_dists:
@@ -2216,7 +2229,8 @@ def _sheet_cost(blocks, dm, start_time, cfg):
 
     if start_time:
         _suppress = cfg.get("suppress_no_milking", True)
-        _ct2 = calc_times(blocks, dm, start_time, suppress_no_milking=_suppress,
+        _ct2 = calc_times(blocks, dm, start_time, dm_dur=dm_dur,
+                          suppress_no_milking=_suppress,
                           precomputed_dists=all_dists)
         all_times  = _ct2[0] if _ct2 is not None else None
         _end_cur2  = _ct2[1] if _ct2 is not None else None
@@ -2428,7 +2442,7 @@ def _sheet_cost(blocks, dm, start_time, cfg):
     return total_km + milking_equiv + vol_pen + shift_pen + shift_hours_cost + cap_pen + plant_win_cost
 
 
-def _sheet_cost_breakdown(blocks, dm, start_time, cfg):
+def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
     """Same as _sheet_cost but returns a dict of cost components instead of a scalar.
     Used by the Full Cost Report so it always uses exactly the same logic as the solver."""
     # Re-use _sheet_cost internals by running both and computing the breakdown.
@@ -2447,7 +2461,8 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg):
     all_times    = None
     _suppress    = cfg.get("suppress_no_milking", True)
     if start_time:
-        _ct = calc_times(blocks, dm, start_time, suppress_no_milking=_suppress)
+        _ct = calc_times(blocks, dm, start_time, dm_dur=dm_dur,
+                         suppress_no_milking=_suppress)
         if _ct is not None:
             all_times = _ct[0]
             base = datetime.combine(date.today(), start_time)
@@ -2604,12 +2619,12 @@ def _optimize_split_positions(blocks, dm, start_time, cfg, dm_dur=None):
                 continue   # only optimise window-constrained dests
             best_pos  = dest_d.get("split_after") if dest_d.get("split_after") is not None else n_farms
             dest_d["split_after"] = best_pos
-            best_cost = _sheet_cost(blocks, dm, start_time, cfg)
+            best_cost = _sheet_cost(blocks, dm, start_time, cfg, dm_dur=dm_dur)
             for pos in range(n_farms + 1):
                 if pos == best_pos:
                     continue
                 dest_d["split_after"] = pos
-                c = _sheet_cost(blocks, dm, start_time, cfg)
+                c = _sheet_cost(blocks, dm, start_time, cfg, dm_dur=dm_dur)
                 if c < best_cost:
                     best_cost = c
                     best_pos  = pos
@@ -2619,14 +2634,14 @@ def _optimize_split_positions(blocks, dm, start_time, cfg, dm_dur=None):
     return changed
 
 
-def _sheet_cost_breakdown_state(state, dm, cache, fname, cfg):
+def _sheet_cost_breakdown_state(state, dm, cache, fname, cfg, dm_dur=None):
     """Aggregate _sheet_cost_breakdown across all sheets in a solver state."""
     totals = {"km":0.0,"milking":0.0,"shift":0.0,"overtime":0.0,"cap":0.0,"plant_win":0.0,"total":0.0}
     for sname, blocks in state:
         entry = cache.get(fname, {}).get(sname, {})
         st    = entry.get("start_time") if isinstance(entry, dict) else None
         if not st: continue
-        bd = _sheet_cost_breakdown(blocks, dm, st, cfg)
+        bd = _sheet_cost_breakdown(blocks, dm, st, cfg, dm_dur=dm_dur)
         for k in totals:
             totals[k] += bd.get(k, 0.0)
     return totals
@@ -2880,11 +2895,12 @@ class IntraRouteOptimiser(QThread):
     finished = pyqtSignal(dict)            # {(fname,sname): improved_blocks}
     log      = pyqtSignal(str)
 
-    def __init__(self, fname, cache, dm, cfg, sheet_mods, parent=None):
+    def __init__(self, fname, cache, dm, cfg, sheet_mods, parent=None, dm_dur=None):
         super().__init__(parent)
         self.fname      = fname
         self.cache      = cache
         self.dm         = dm
+        self.dm_dur     = dm_dur
         self.cfg        = cfg
         self.sheet_mods = dict(sheet_mods)
 
@@ -2917,14 +2933,14 @@ class IntraRouteOptimiser(QThread):
                     rows = block["rows"]
                     n    = len(rows)
                     if n < 2: continue
-                    base_c    = _sheet_cost(blocks, self.dm, start_time, self.cfg)
+                    base_c    = _sheet_cost(blocks, self.dm, start_time, self.cfg, dm_dur=self.dm_dur)
                     best_rows = rows[:]
                     best_c    = base_c
                     for i in range(n - 1):
                         for j in range(i + 1, n):
                             trial = rows[:i] + rows[i:j+1][::-1] + rows[j+1:]
                             blocks[b_idx] = dict(block, rows=trial)
-                            c = _sheet_cost(blocks, self.dm, start_time, self.cfg)
+                            c = _sheet_cost(blocks, self.dm, start_time, self.cfg, dm_dur=self.dm_dur)
                             if c < best_c:
                                 best_c = c; best_rows = trial[:]
                     blocks[b_idx] = dict(block, rows=best_rows)
@@ -2938,7 +2954,7 @@ class IntraRouteOptimiser(QThread):
                     rows = block["rows"]
                     n    = len(rows)
                     if n < 2: continue
-                    base_c    = _sheet_cost(blocks, self.dm, start_time, self.cfg)
+                    base_c    = _sheet_cost(blocks, self.dm, start_time, self.cfg, dm_dur=self.dm_dur)
                     best_rows = rows[:]
                     best_c    = base_c
                     for i in range(n):
@@ -2947,7 +2963,7 @@ class IntraRouteOptimiser(QThread):
                         for j in range(len(rest) + 1):
                             trial = rest[:j] + [farm] + rest[j:]
                             blocks[b_idx] = dict(block, rows=trial)
-                            c = _sheet_cost(blocks, self.dm, start_time, self.cfg)
+                            c = _sheet_cost(blocks, self.dm, start_time, self.cfg, dm_dur=self.dm_dur)
                             if c < best_c:
                                 best_c = c; best_rows = trial[:]
                     blocks[b_idx] = dict(block, rows=best_rows)
@@ -3038,11 +3054,12 @@ class ALNSSolver(QThread):
     log      = pyqtSignal(str)
 
     def __init__(self, fname, cache, dm, cfg, parent=None, sheet_mods=None,
-                 locked_sheets=None):
+                 locked_sheets=None, dm_dur=None):
         super().__init__(parent)
         self.fname         = fname
         self.cache         = cache
         self.dm            = dm
+        self.dm_dur        = dm_dur
         self.cfg           = cfg
         self._stop         = False
         self.sheet_mods    = sheet_mods or {}
@@ -3071,7 +3088,7 @@ class ALNSSolver(QThread):
             else:
                 entry = self.cache[self.fname].get(sname, {})
                 st    = entry.get("start_time") if isinstance(entry, dict) else None
-                c     = _sheet_cost(blocks, self.dm, st, self.cfg)
+                c     = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
                 total += c
                 if sheet_cost_cache is not None:
                     sheet_cost_cache[sname] = c
@@ -3084,7 +3101,7 @@ class ALNSSolver(QThread):
         for sname, blocks in state:
             entry = self.cache[self.fname].get(sname, {})
             st    = entry.get("start_time") if isinstance(entry, dict) else None
-            cache[sname] = _sheet_cost(blocks, self.dm, st, self.cfg)
+            cache[sname] = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
         return cache
 
     # -- flat farm list --------------------------------------------------------
@@ -3142,7 +3159,7 @@ class ALNSSolver(QThread):
         for s_idx, (sname, blocks) in enumerate(state):
             entry = self.cache[self.fname].get(sname, {})
             st    = entry.get("start_time") if isinstance(entry, dict) else None
-            base  = _sheet_cost(blocks, self.dm, st, self.cfg)
+            base  = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
             for b_idx, block in enumerate(blocks):
                 if _is_preload_block(block):
                     continue   # frozen
@@ -3151,7 +3168,7 @@ class ALNSSolver(QThread):
                 for f_idx in range(len(block["rows"])):
                     trial = copy.deepcopy(blocks)
                     trial[b_idx]["rows"].pop(f_idx)
-                    new_c = _sheet_cost(trial, self.dm, st, self.cfg)
+                    new_c = _sheet_cost(trial, self.dm, st, self.cfg, dm_dur=self.dm_dur)
                     savings.append((base - new_c, s_idx, b_idx, f_idx))
         savings.sort(reverse=True)
 
@@ -3175,7 +3192,7 @@ class ALNSSolver(QThread):
         return new_state, removed
 
     def _best_insert_cost(self, blocks, farm, dm, shift_start=None,
-                          baseline=None):
+                          baseline=None, dm_dur=None):
         """
         Return (b_idx, pos, marginal_cost) for cheapest insertion of farm.
 
@@ -3187,7 +3204,7 @@ class ALNSSolver(QThread):
         Skips preload blocks and fixed-vol blocks.
         """
         if baseline is None:
-            baseline = _sheet_cost(blocks, dm, shift_start, self.cfg)
+            baseline = _sheet_cost(blocks, dm, shift_start, self.cfg, dm_dur=dm_dur)
 
         best_b, best_pos, best_cost = None, None, float("inf")
 
@@ -3201,7 +3218,7 @@ class ALNSSolver(QThread):
                 trial_rows   = rows[:pos] + [farm] + rows[pos:]
                 trial_block  = dict(block, rows=trial_rows)
                 trial_blocks = blocks[:b_idx] + [trial_block] + blocks[b_idx+1:]
-                delta = _sheet_cost(trial_blocks, dm, shift_start, self.cfg) - baseline
+                delta = _sheet_cost(trial_blocks, dm, shift_start, self.cfg, dm_dur=dm_dur) - baseline
                 if delta < best_cost:
                     best_b, best_pos, best_cost = b_idx, pos, delta
 
@@ -3232,7 +3249,7 @@ class ALNSSolver(QThread):
         # This saves one _sheet_cost call per (farm x sheet) combination ?
         # with 20 removed farms and 27 sheets that's 540 saved calls per repair.
         baseline_cache = {
-            sname: _sheet_cost(blocks, self.dm, start_map[sname], self.cfg)
+            sname: _sheet_cost(blocks, self.dm, start_map[sname], self.cfg, dm_dur=self.dm_dur)
             for _, sname, blocks in eligible
         }
 
@@ -3242,7 +3259,8 @@ class ALNSSolver(QThread):
             for _, sname, blocks in eligible:
                 b, pos, c = self._best_insert_cost(blocks, farm, self.dm,
                                                     shift_start=start_map[sname],
-                                                    baseline=baseline_cache[sname])
+                                                    baseline=baseline_cache[sname],
+                                                    dm_dur=self.dm_dur)
                 if b is not None and c < best_c:
                     best_c = c
             return best_c
@@ -3254,7 +3272,8 @@ class ALNSSolver(QThread):
             for s_idx, sname, blocks in eligible:
                 b_idx, pos, c = self._best_insert_cost(blocks, farm, self.dm,
                                                         shift_start=start_map[sname],
-                                                        baseline=baseline_cache[sname])
+                                                        baseline=baseline_cache[sname],
+                                                        dm_dur=self.dm_dur)
                 if b_idx is not None and c < best_c:
                     best_s, best_b, best_pos, best_c = s_idx, b_idx, pos, c
             if best_s is not None:
@@ -3265,7 +3284,8 @@ class ALNSSolver(QThread):
                 # on the same sheet see the updated cost.
                 sname_mod = state[best_s][0]
                 baseline_cache[sname_mod] = _sheet_cost(
-                    state[best_s][1], self.dm, start_map[sname_mod], self.cfg)
+                    state[best_s][1], self.dm, start_map[sname_mod], self.cfg,
+                    dm_dur=self.dm_dur)
         return state, cross_route
 
     def _repair_regret(self, state, removed, k=2):
@@ -3287,7 +3307,7 @@ class ALNSSolver(QThread):
 
         # Pre-compute baseline _sheet_cost for each eligible sheet.
         baseline_cache = {
-            sname: _sheet_cost(blocks, self.dm, start_map[sname], self.cfg)
+            sname: _sheet_cost(blocks, self.dm, start_map[sname], self.cfg, dm_dur=self.dm_dur)
             for s_idx, (sname, blocks) in enumerate(state)
             if s_idx in eligible_idxs
         }
@@ -3304,7 +3324,8 @@ class ALNSSolver(QThread):
                         continue   # sheet has no start time ? frozen
                     b_idx, pos, c = self._best_insert_cost(blocks, farm, self.dm,
                                                             shift_start=start_map[sname],
-                                                            baseline=baseline_cache[sname])
+                                                            baseline=baseline_cache[sname],
+                                                            dm_dur=self.dm_dur)
                     if b_idx is not None:
                         slot_costs.append((c, s_idx, b_idx, pos))
                 slot_costs.sort()
@@ -3325,7 +3346,8 @@ class ALNSSolver(QThread):
             # Invalidate baseline for the modified sheet
             sname_mod = state[s_idx][0]
             baseline_cache[sname_mod] = _sheet_cost(
-                state[s_idx][1], self.dm, start_map[sname_mod], self.cfg)
+                state[s_idx][1], self.dm, start_map[sname_mod], self.cfg,
+                dm_dur=self.dm_dur)
         return state, cross_route
 
     # ??????????????????????????????????????????????????????????????????????????
@@ -4009,7 +4031,7 @@ class ALNSSolver(QThread):
                 entry = self.cache.get(self.fname, {}).get(sname, {})
                 st    = entry.get("start_time") if isinstance(entry, dict) else None
                 if st:
-                    _optimize_split_positions(blocks, self.dm, st, self.cfg)
+                    _optimize_split_positions(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
 
         cfg_no_win = dict(self.cfg, plant_win_penalty=0.0, plant_windows={},
                           win_miss_penalty=0.0, cap_penalty=0.0)
@@ -4022,8 +4044,8 @@ class ALNSSolver(QThread):
             st    = entry.get("start_time") if isinstance(entry, dict) else None
             for block in blocks:
                 if _is_preload_block(block) or _is_fixed_vol_block(block):
-                    frozen_cost_offset        += _sheet_cost([block], self.dm, st, self.cfg)
-                    frozen_cost_offset_no_win += _sheet_cost([block], self.dm, st, cfg_no_win)
+                    frozen_cost_offset        += _sheet_cost([block], self.dm, st, self.cfg, dm_dur=self.dm_dur)
+                    frozen_cost_offset_no_win += _sheet_cost([block], self.dm, st, cfg_no_win, dm_dur=self.dm_dur)
 
         best_state = copy.deepcopy(state)
         cur_sheet_cache  = self._make_sheet_cost_cache(state)
@@ -4034,7 +4056,7 @@ class ALNSSolver(QThread):
         cost_no_win = sum(
             _sheet_cost(blocks, self.dm,
                         (self.cache.get(self.fname, {}).get(sname, {}) or {}).get("start_time"),
-                        cfg_no_win)
+                        cfg_no_win, dm_dur=self.dm_dur)
             for sname, blocks in state
         ) + _group_vol_penalty(state, orig_dest_vols, self.cfg)
         cost_no_win -= frozen_cost_offset_no_win
@@ -4215,7 +4237,7 @@ class ALNSSolver(QThread):
                 if sn in changed_sheets:
                     entry = self.cache[self.fname].get(sn, {})
                     st    = entry.get("start_time") if isinstance(entry, dict) else None
-                    new_sheet_cache[sn] = _sheet_cost(blocks, self.dm, st, self.cfg)
+                    new_sheet_cache[sn] = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
             new_cost = sum(new_sheet_cache.values()) + _group_vol_penalty(new_state, orig_dest_vols, self.cfg) - frozen_cost_offset
             delta    = new_cost - cur_cost
 
@@ -4243,9 +4265,9 @@ class ALNSSolver(QThread):
                         if sname in changed_sheets:
                             entry = self.cache.get(self.fname, {}).get(sname, {})
                             st    = entry.get("start_time") if isinstance(entry, dict) else None
-                            if st and _optimize_split_positions(blocks, self.dm, st, self.cfg):
+                            if st and _optimize_split_positions(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur):
                                 split_changed = True
-                                new_sheet_cache[sname] = _sheet_cost(blocks, self.dm, st, self.cfg)
+                                new_sheet_cache[sname] = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
                 if split_changed:
                     cur_cost        = sum(new_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) - frozen_cost_offset
                     cur_sheet_cache = new_sheet_cache
@@ -4271,7 +4293,7 @@ class ALNSSolver(QThread):
 
             # -- Every 50 iterations: detailed diagnostic output --------------
             if it % 50 == 49:
-                bd_best = _sheet_cost_breakdown_state(best_state, self.dm, self.cache, self.fname, self.cfg)
+                bd_best = _sheet_cost_breakdown_state(best_state, self.dm, self.cache, self.fname, self.cfg, dm_dur=self.dm_dur)
                 vol_pen_d = _group_vol_penalty(best_state, orig_dest_vols, self.cfg)
 
                 # Per-processor vol deviation (uses the same offload accounting
@@ -5822,7 +5844,7 @@ class MainWindow(QMainWindow):
             )
             split_tag = " [SPLIT]" if has_split else ""
 
-            bd = _sheet_cost_breakdown(blocks, self.dm, start_time, cfg)
+            bd = _sheet_cost_breakdown(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
 
             lines.append(f"\n{sname}{tag}{split_tag}  total={bd['total']:.1f}"
                          f"  km={bd['km']:.1f}  milk={bd['milking']:.1f}"
@@ -6136,7 +6158,7 @@ class MainWindow(QMainWindow):
             blocks = copy.deepcopy(self._sheet_mods.get(key, entry.get("blocks", [])))
 
             # Before: km and hours
-            bd_before = _sheet_cost_breakdown(blocks, self.dm, start_time, cfg)
+            bd_before = _sheet_cost_breakdown(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
             km_b  = bd_before["km"]
             h_b   = bd_before["shift"]
             ot_b  = bd_before["overtime"]
@@ -6153,14 +6175,14 @@ class MainWindow(QMainWindow):
                     if n < 2: continue
                     origin = "VEDDER" if b_idx == 0 else (
                         _block_last_dest_key(blocks[b_idx-1]) or "VEDDER")
-                    base_c = _sheet_cost(blocks, self.dm, start_time, cfg)
+                    base_c = _sheet_cost(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
                     best_rows = rows[:]
                     best_c    = base_c
                     for i in range(n - 1):
                         for j in range(i + 1, n):
                             trial_rows = rows[:i] + rows[i:j+1][::-1] + rows[j+1:]
                             blocks[b_idx] = dict(block, rows=trial_rows)
-                            c = _sheet_cost(blocks, self.dm, start_time, cfg)
+                            c = _sheet_cost(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
                             if c < best_c:
                                 best_c    = c
                                 best_rows = trial_rows[:]
@@ -6175,7 +6197,7 @@ class MainWindow(QMainWindow):
                     rows = block["rows"]
                     n    = len(rows)
                     if n < 2: continue
-                    base_c    = _sheet_cost(blocks, self.dm, start_time, cfg)
+                    base_c    = _sheet_cost(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
                     best_rows = rows[:]
                     best_c    = base_c
                     for i in range(n):
@@ -6184,7 +6206,7 @@ class MainWindow(QMainWindow):
                         for j in range(len(remaining) + 1):
                             trial_rows = remaining[:j] + [farm] + remaining[j:]
                             blocks[b_idx] = dict(block, rows=trial_rows)
-                            c = _sheet_cost(blocks, self.dm, start_time, cfg)
+                            c = _sheet_cost(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
                             if c < best_c:
                                 best_c    = c
                                 best_rows = trial_rows[:]
@@ -6192,7 +6214,7 @@ class MainWindow(QMainWindow):
                     if best_rows != rows:
                         improved = True
 
-            bd_after = _sheet_cost_breakdown(blocks, self.dm, start_time, cfg)
+            bd_after = _sheet_cost_breakdown(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
             km_a  = bd_after["km"]
             h_a   = bd_after["shift"]
             ot_a  = bd_after["overtime"]
@@ -6973,6 +6995,71 @@ class MainWindow(QMainWindow):
 
             irma_ws_rows_all = [r for rows in farm_rows_by_block for r in rows]
 
+            # -- Style donor row (font/border for new or newly-revealed cells) --
+            # Two situations create cells with no trustworthy existing style:
+            #   1. Rows we INSERT for overflow farms start out as bare openpyxl
+            #      cells with no font/border at all.
+            #   2. Cells revealed by splitting a wide ROBOT-style milking merge
+            #      (e.g. E14:P14) into the standard four fields can carry stale
+            #      leftover formatting from whatever the cell looked like before
+            #      it was ever merged ? observed on a real file as "MS Sans
+            #      Serif" 10pt with no border, instead of the sheet's actual
+            #      Calibri 13pt with thin/medium table borders.
+            # Fix: scan for a normal (non-ROBOT, standard-merge) farm row in
+            # this sheet and use its per-column font/border as the style
+            # source for both cases below, so new/revealed cells match the
+            # rest of the table instead of looking visually broken.  Font name
+            # is always forced to Calibri (the sheet's actual font) even if a
+            # donor cell's stored font name is something else, while size/
+            # bold/italic/colour are preserved from the donor.
+            style_donor_row = None
+            for _r in irma_ws_rows_all:
+                _is_wide = any(
+                    mr.min_row == _r and mr.max_row == _r and
+                    mr.min_col <= C_M1_START and mr.max_col >= C_M2_START and
+                    (mr.max_col - mr.min_col + 1) > 3
+                    for mr in ws.merged_cells.ranges)
+                if not _is_wide:
+                    style_donor_row = _r
+                    break
+
+            def _calibri_font(donor_font):
+                return Font(name="Calibri",
+                           size=donor_font.size or 13,
+                           bold=donor_font.bold, italic=donor_font.italic,
+                           color=donor_font.color, underline=donor_font.underline)
+
+            def _copy_border(donor_border):
+                """Rebuild a plain Border from a donor cell's border.
+
+                openpyxl returns border (and other style) attributes as a
+                StyleProxy wrapper in some access paths, which isn't directly
+                assignable to another cell (it's unhashable, so the shared
+                style table rejects it).  Reading each side's style/colour and
+                constructing a fresh Border avoids that entirely.
+                """
+                def _side(s):
+                    if s is None or s.style is None:
+                        return Side(style=None)
+                    return Side(style=s.style, color=s.color)
+                return Border(left=_side(donor_border.left),
+                              right=_side(donor_border.right),
+                              top=_side(donor_border.top),
+                              bottom=_side(donor_border.bottom))
+
+            def _apply_table_style(dst_row, col, src_row=None):
+                """Copy font (forced to Calibri) + border from the style donor
+                row (or src_row if given) onto (dst_row, col).  No-op if no
+                donor row was found (extremely unlikely ? would require every
+                farm row on the sheet to be a ROBOT placeholder)."""
+                donor_row = src_row if src_row is not None else style_donor_row
+                if donor_row is None:
+                    return
+                donor_cell = ws.cell(donor_row, col)
+                dst_cell   = ws.cell(dst_row, col)
+                dst_cell.font   = _calibri_font(donor_cell.font)
+                dst_cell.border = _copy_border(donor_cell.border)
+
             # extra cols across all mod blocks
             mod_rows_all = [f for b in mod_blocks for f in b.get("rows", [])]
             extra_cols_in_use = set()
@@ -7176,6 +7263,14 @@ class MainWindow(QMainWindow):
                                    end_row=mxr + extra, end_column=mxc)
 
                 # Number formats: copy column-by-column from the template row.
+                # Font + border: copy from the style donor row (a normal,
+                # non-ROBOT farm row) so inserted rows match the sheet's
+                # actual Calibri table styling instead of showing as bare,
+                # unbordered openpyxl-default cells.  Falls back to the
+                # template row's own styling if no donor was found anywhere
+                # on the sheet (would require every farm row to be ROBOT).
+                _style_src_row = style_donor_row if style_donor_row is not None \
+                                 else template_row
                 for offset in range(extra):
                     new_row = insert_after + 1 + offset
                     for col in range(1, ws.max_column + 1):
@@ -7184,6 +7279,7 @@ class MainWindow(QMainWindow):
                         if tmpl_cell.number_format and \
                                 tmpl_cell.number_format != "General":
                             new_cell.number_format = tmpl_cell.number_format
+                        _apply_table_style(new_row, col, src_row=_style_src_row)
 
                 # Merges for the inserted rows.  We can't blindly copy the
                 # template row's merges: the template (the block's last original
@@ -7440,6 +7536,14 @@ class MainWindow(QMainWindow):
             # independently visible, instead of restoring the wide span that
             # would hide three of them under Excel's "only show top-left of
             # a merge" behaviour.
+            #
+            # The three newly-revealed top-left cells (M1 finish, M2 start,
+            # M2 finish) were hidden under the wide merge and can carry stale
+            # leftover formatting from before the merge ever existed ?
+            # observed on a real file as "MS Sans Serif" 10pt with no border,
+            # rather than the sheet's actual Calibri 13pt table styling.  Style
+            # all four from the donor row so they match the rest of the table
+            # regardless of what was hiding underneath.
             for row in milking_split_rows:
                 ws.merge_cells(start_row=row, start_column=C_M1_START,
                                end_row=row,   end_column=C_M1_START + 2)
@@ -7449,6 +7553,12 @@ class MainWindow(QMainWindow):
                                end_row=row,   end_column=C_M2_START + 2)
                 ws.merge_cells(start_row=row, start_column=C_M2_FINISH,
                                end_row=row,   end_column=C_M2_FINISH + 2)
+                # Only the three cells that were genuinely hidden under the
+                # wide merge need restyling ? M1_START was the merge's visible
+                # top-left cell and already had its own correct (and possibly
+                # row-specific) styling, which we don't want to overwrite.
+                for col in (C_M1_FINISH, C_M2_START, C_M2_FINISH):
+                    _apply_table_style(row, col)
 
             # Rows where a ROBOT farm was slotted into a row that previously
             # had the standard four-field merge layout: combine into one wide
@@ -7492,7 +7602,8 @@ class MainWindow(QMainWindow):
         self._intra_btn.setEnabled(False)
         self._solve_btn.setEnabled(False)
         self._intra_thread = IntraRouteOptimiser(
-            fname, self._cache, self.dm, cfg, self._sheet_mods, parent=self)
+            fname, self._cache, self.dm, cfg, self._sheet_mods, parent=self,
+            dm_dur=self.dm_dur)
         self._intra_thread.progress.connect(self._on_intra_progress)
         self._intra_thread.finished.connect(self._on_intra_finished)
         self._intra_thread.log.connect(self._solver_log.append)
@@ -7599,7 +7710,8 @@ class MainWindow(QMainWindow):
 
         self._solver_thread = ALNSSolver(fname, self._cache, self.dm, cfg,
                                          sheet_mods=self._sheet_mods,
-                                         locked_sheets=locked_sheets)
+                                         locked_sheets=locked_sheets,
+                                         dm_dur=self.dm_dur)
         self._solver_thread.progress.connect(self._on_solver_progress)
         self._solver_thread.finished.connect(self._on_solver_finished)
         self._solver_thread.log.connect(self._on_solver_log)
