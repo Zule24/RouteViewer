@@ -7048,6 +7048,7 @@ class MainWindow(QMainWindow):
             # need updating yet.  Track cumulative offset to shift earlier
             # blocks' rows after all insertions are done.
             total_inserted = [0] * len(farm_rows_by_block)   # rows inserted per block
+            insertions = []   # [(first_inserted_row, count), ...] for row shifting
             for b_idx in range(len(farm_rows_by_block) - 1, -1, -1):
                 if b_idx >= len(mod_blocks):
                     continue
@@ -7073,14 +7074,46 @@ class MainWindow(QMainWindow):
                 insert_after = slot_rows[-1]
                 template_row = slot_rows[-1]
 
-                ws.insert_rows(insert_after + 1, extra)
-
-                # Replicate single-row merges and number formats from template
-                template_merges = [
+                # CRITICAL: openpyxl's insert_rows() shifts cell *values* down
+                # but does NOT move merged-cell ranges.  Every merge below the
+                # insertion point therefore stays `extra` rows too high and now
+                # sits on top of the rows we just inserted.  On save those stale
+                # merges silently clobber the farm data we write into the new
+                # rows ? a full-width section merge (e.g. A:AX on the "TOTAL
+                # VOLUME" row) blanks the entire row, and a milking merge hides
+                # cells under it.  This is the root of "milking times disappear
+                # when the solver adds farms to a block."
+                #
+                # Fix: capture every merge below the insertion point and unmerge
+                # it BEFORE inserting (the worksheet is still internally
+                # consistent here ? unmerging AFTER insert_rows raises KeyError
+                # on the shifted merged-cell stubs), insert the rows, then
+                # re-merge each captured range `extra` rows lower so the merge
+                # model matches the shifted data.  Also grab the template row's
+                # merges now, before we disturb anything below it.
+                non_milking_tmpl_merges = [
                     (mr.min_col, mr.max_col)
                     for mr in ws.merged_cells.ranges
                     if mr.min_row == template_row and mr.max_row == template_row
+                    and (mr.max_col < C_M1_START or mr.min_col > C_M2_FINISH + 2)
                 ]
+                below = [
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+                    for mr in list(ws.merged_cells.ranges)
+                    if mr.min_row > insert_after
+                ]
+                for (mnr, mnc, mxr, mxc) in below:
+                    ws.unmerge_cells(start_row=mnr, start_column=mnc,
+                                     end_row=mxr, end_column=mxc)
+
+                ws.insert_rows(insert_after + 1, extra)
+                insertions.append((insert_after + 1, extra))
+
+                for (mnr, mnc, mxr, mxc) in below:
+                    ws.merge_cells(start_row=mnr + extra, start_column=mnc,
+                                   end_row=mxr + extra, end_column=mxc)
+
+                # Number formats: copy column-by-column from the template row.
                 for offset in range(extra):
                     new_row = insert_after + 1 + offset
                     for col in range(1, ws.max_column + 1):
@@ -7089,12 +7122,45 @@ class MainWindow(QMainWindow):
                         if tmpl_cell.number_format and \
                                 tmpl_cell.number_format != "General":
                             new_cell.number_format = tmpl_cell.number_format
-                    for (min_c, max_c) in template_merges:
+
+                # Merges for the inserted rows.  We can't blindly copy the
+                # template row's merges: the template (the block's last original
+                # slot) might be a blank or ROBOT row whose milking region is a
+                # single wide merge (E:P), which would hide three of the four
+                # time values for any real farm placed in a new row.  So copy
+                # only the template's NON-milking merges (captured above), and
+                # build the milking region to match the farm that will actually
+                # occupy each new row: the standard four 3-column fields for a
+                # real farm, or one wide span for a ROBOT placeholder.  The
+                # generic unmerge/re-write/re-merge passes below then handle
+                # these the same as pre-existing rows.
+                MK_LO = C_M1_START
+                MK_HI = C_M2_FINISH + 2
+                for offset in range(extra):
+                    new_row  = insert_after + 1 + offset
+                    farm_idx = len(slot_rows) + offset
+                    farm = (block_farms[farm_idx]
+                            if farm_idx < len(block_farms) else None)
+                    is_robot = (farm is not None and
+                                str(farm.get("m1_start", "")).strip().upper()
+                                == "ROBOT")
+                    for (min_c, max_c) in non_milking_tmpl_merges:
                         try:
                             ws.merge_cells(start_row=new_row, start_column=min_c,
                                            end_row=new_row,   end_column=max_c)
                         except Exception:
                             pass
+                    try:
+                        if is_robot:
+                            ws.merge_cells(start_row=new_row, start_column=MK_LO,
+                                           end_row=new_row,   end_column=MK_HI)
+                        else:
+                            for c0 in (C_M1_START, C_M1_FINISH,
+                                       C_M2_START, C_M2_FINISH):
+                                ws.merge_cells(start_row=new_row, start_column=c0,
+                                               end_row=new_row, end_column=c0 + 2)
+                    except Exception:
+                        pass
                 # Extend this block's slots with the new rows (insert_after is
                 # still valid since we inserted below it)
                 farm_rows_by_block[b_idx] = slot_rows + [
@@ -7112,7 +7178,21 @@ class MainWindow(QMainWindow):
 
             irma_ws_rows_all = [r for rows in farm_rows_by_block for r in rows]
 
-            # Recompute target_cells and merges_to_redo with updated row numbers
+            # The milking_split_rows / milking_combine_rows lists (ROBOT wide-
+            # merge handling) were captured BEFORE any rows were inserted, so an
+            # entry for a row that sits below an insertion point is now stale.
+            # Shift each by the number of rows inserted strictly above it so the
+            # end-of-loop re-merge lands on the row the data actually moved to.
+            def _shift_row(orig_row):
+                s = 0
+                for (pos, n) in insertions:
+                    if orig_row >= pos:
+                        s += n
+                return orig_row + s
+            if insertions:
+                milking_split_rows   = [_shift_row(r) for r in milking_split_rows]
+                milking_combine_rows = {_shift_row(r) for r in milking_combine_rows}
+
             target_cells = set()
             for ws_row in irma_ws_rows_all:
                 for col in sheet_write_cols:
