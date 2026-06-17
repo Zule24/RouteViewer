@@ -3873,10 +3873,25 @@ class ALNSSolver(QThread):
         #
         # paired_followers: list of (sname, b_idx, lead_uid, follower_dict,
         #                            order_within_run)
+        # paired_followers entries: (sname, b_idx, lead_uid, follower_dict, order)
         paired_followers = []
+        # lead_uid -> original lead prior_vol (before folding followers in),
+        # so we can restore it on reinsert.
+        lead_orig_vol = {}
 
         def _strip_pairs(sname, blocks):
-            """Strip followers of adjacent same-IRMA runs, keeping the lead."""
+            """Strip followers of adjacent same-IRMA runs, keeping the lead.
+
+            Critically, the follower's volume is FOLDED INTO the lead while
+            the followers are sidelined.  The solver only sees the lead during
+            optimisation, so if we left the lead carrying only its own volume,
+            the capacity and volume-balance penalties would undercount the
+            real load of the pair and the solver would happily place the pair
+            on a route that actually overflows once the followers are added
+            back.  By making the lead temporarily carry the COMBINED pair
+            volume, every capacity/balance decision the solver makes reflects
+            the true load.  Original volumes are restored on reinsert.
+            """
             stripped = []
             for b_idx, block in enumerate(blocks):
                 rows = block.get("rows", [])
@@ -3884,20 +3899,38 @@ class ALNSSolver(QThread):
                 i = 0
                 while i < len(rows):
                     lead = rows[i]
-                    new_rows.append(lead)
                     lead_irma = lead.get("irma", "")
                     lead_uid  = lead.get("_uid")
                     # Gather the adjacent run of identical IRMAs after the lead
                     j = i + 1
                     order = 1
+                    folded_vol = 0.0
+                    have_followers = False
                     while (j < len(rows)
                            and rows[j].get("irma", "") == lead_irma
                            and lead_irma != ""):
+                        have_followers = True
+                        follower = copy.deepcopy(rows[j])
+                        fv = follower.get("prior_vol")
+                        if isinstance(fv, (int, float)):
+                            folded_vol += fv
                         paired_followers.append(
-                            (sname, b_idx, lead_uid,
-                             copy.deepcopy(rows[j]), order))
+                            (sname, b_idx, lead_uid, follower, order))
                         order += 1
                         j += 1
+                    if have_followers:
+                        # Fold follower volume into a COPY of the lead so the
+                        # solver sees the combined load; remember the original
+                        # so we can restore it on reinsert.
+                        lead_copy = copy.deepcopy(lead)
+                        lv = lead_copy.get("prior_vol")
+                        lv = lv if isinstance(lv, (int, float)) else 0.0
+                        if lead_uid is not None:
+                            lead_orig_vol[lead_uid] = lead.get("prior_vol")
+                        lead_copy["prior_vol"] = lv + folded_vol
+                        new_rows.append(lead_copy)
+                    else:
+                        new_rows.append(lead)
                     i = j
                 stripped.append(dict(block, rows=new_rows))
             return stripped
@@ -3906,6 +3939,13 @@ class ALNSSolver(QThread):
             """Re-insert followers immediately after their lead in the solved state."""
             if not paired_followers:
                 return result
+            # First restore every lead's original (un-folded) volume.
+            for sname, blocks in result.items():
+                for block in blocks:
+                    for farm in block.get("rows", []):
+                        uid = farm.get("_uid")
+                        if uid in lead_orig_vol:
+                            farm["prior_vol"] = lead_orig_vol[uid]
             # Build a uid -> (sname, b_idx, f_idx) map across the solved state
             uid_loc = {}
             for sname, blocks in result.items():
@@ -7022,6 +7062,19 @@ class MainWindow(QMainWindow):
                 merges_to_redo.append(
                     (mr.min_row, mr.min_col, mr.max_row, mr.max_col))
 
+            # Snapshot every original single-row merge BEFORE we start
+            # unmerging.  Inserted rows (below) copy their non-milking merge
+            # layout (IRMA / name / location / prior_vol / etc.) from their
+            # block's template row ? but by the time the insertion loop runs,
+            # Phase A has already unmerged all the write-column merges, so
+            # reading them off the live worksheet would miss exactly the ones
+            # we need.  Capture them here while they still exist.
+            orig_row_merges = {}
+            for mr in ws.merged_cells.ranges:
+                if mr.min_row == mr.max_row:
+                    orig_row_merges.setdefault(mr.min_row, []).append(
+                        (mr.min_col, mr.max_col))
+
             for (min_r, min_c, max_r, max_c) in merges_to_redo:
                 ws.unmerge_cells(
                     start_row=min_r, start_column=min_c,
@@ -7056,6 +7109,7 @@ class MainWindow(QMainWindow):
             # need updating yet.  Track cumulative offset to shift earlier
             # blocks' rows after all insertions are done.
             total_inserted = [0] * len(farm_rows_by_block)   # rows inserted per block
+            insertions = []   # [(first_inserted_row, count), ...] for row shifting
             for b_idx in range(len(farm_rows_by_block) - 1, -1, -1):
                 if b_idx >= len(mod_blocks):
                     continue
@@ -7081,14 +7135,47 @@ class MainWindow(QMainWindow):
                 insert_after = slot_rows[-1]
                 template_row = slot_rows[-1]
 
-                ws.insert_rows(insert_after + 1, extra)
-
-                # Replicate single-row merges and number formats from template
-                template_merges = [
-                    (mr.min_col, mr.max_col)
-                    for mr in ws.merged_cells.ranges
-                    if mr.min_row == template_row and mr.max_row == template_row
+                # CRITICAL: openpyxl's insert_rows() shifts cell *values* down
+                # but does NOT move merged-cell ranges.  Every merge below the
+                # insertion point therefore stays `extra` rows too high and now
+                # sits on top of the rows we just inserted.  On save those stale
+                # merges silently clobber the farm data we write into the new
+                # rows ? a full-width section merge (e.g. A:AX on the "TOTAL
+                # VOLUME" row) blanks the entire row, and a milking merge hides
+                # cells under it.  This is the root of "milking times disappear
+                # when the solver adds farms to a block."
+                #
+                # Fix: capture every merge below the insertion point and unmerge
+                # it BEFORE inserting (the worksheet is still internally
+                # consistent here ? unmerging AFTER insert_rows raises KeyError
+                # on the shifted merged-cell stubs), insert the rows, then
+                # re-merge each captured range `extra` rows lower so the merge
+                # model matches the shifted data.  The template row's
+                # non-milking merges come from the snapshot taken before Phase A
+                # unmerged them (reading live ranges here would miss every
+                # write-column merge: IRMA, name, location, prior_vol).
+                non_milking_tmpl_merges = [
+                    (c1, c2)
+                    for (c1, c2) in orig_row_merges.get(template_row, [])
+                    if c2 < C_M1_START or c1 > C_M2_FINISH + 2
                 ]
+                below = [
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+                    for mr in list(ws.merged_cells.ranges)
+                    if mr.min_row > insert_after
+                ]
+                for (mnr, mnc, mxr, mxc) in below:
+                    ws.unmerge_cells(start_row=mnr, start_column=mnc,
+                                     end_row=mxr, end_column=mxc)
+
+                ws.insert_rows(insert_after + 1, extra)
+                insertions.append((insert_after + 1, extra))
+
+                for (mnr, mnc, mxr, mxc) in below:
+                    ws.merge_cells(start_row=mnr + extra, start_column=mnc,
+                                   end_row=mxr + extra, end_column=mxc)
+
+                # Number formats: copy column-by-column from the template row.
                 for offset in range(extra):
                     new_row = insert_after + 1 + offset
                     for col in range(1, ws.max_column + 1):
@@ -7097,12 +7184,45 @@ class MainWindow(QMainWindow):
                         if tmpl_cell.number_format and \
                                 tmpl_cell.number_format != "General":
                             new_cell.number_format = tmpl_cell.number_format
-                    for (min_c, max_c) in template_merges:
+
+                # Merges for the inserted rows.  We can't blindly copy the
+                # template row's merges: the template (the block's last original
+                # slot) might be a blank or ROBOT row whose milking region is a
+                # single wide merge (E:P), which would hide three of the four
+                # time values for any real farm placed in a new row.  So copy
+                # only the template's NON-milking merges (captured above), and
+                # build the milking region to match the farm that will actually
+                # occupy each new row: the standard four 3-column fields for a
+                # real farm, or one wide span for a ROBOT placeholder.  The
+                # generic unmerge/re-write/re-merge passes below then handle
+                # these the same as pre-existing rows.
+                MK_LO = C_M1_START
+                MK_HI = C_M2_FINISH + 2
+                for offset in range(extra):
+                    new_row  = insert_after + 1 + offset
+                    farm_idx = len(slot_rows) + offset
+                    farm = (block_farms[farm_idx]
+                            if farm_idx < len(block_farms) else None)
+                    is_robot = (farm is not None and
+                                str(farm.get("m1_start", "")).strip().upper()
+                                == "ROBOT")
+                    for (min_c, max_c) in non_milking_tmpl_merges:
                         try:
                             ws.merge_cells(start_row=new_row, start_column=min_c,
                                            end_row=new_row,   end_column=max_c)
                         except Exception:
                             pass
+                    try:
+                        if is_robot:
+                            ws.merge_cells(start_row=new_row, start_column=MK_LO,
+                                           end_row=new_row,   end_column=MK_HI)
+                        else:
+                            for c0 in (C_M1_START, C_M1_FINISH,
+                                       C_M2_START, C_M2_FINISH):
+                                ws.merge_cells(start_row=new_row, start_column=c0,
+                                               end_row=new_row, end_column=c0 + 2)
+                    except Exception:
+                        pass
                 # Extend this block's slots with the new rows (insert_after is
                 # still valid since we inserted below it)
                 farm_rows_by_block[b_idx] = slot_rows + [
@@ -7120,25 +7240,63 @@ class MainWindow(QMainWindow):
 
             irma_ws_rows_all = [r for rows in farm_rows_by_block for r in rows]
 
-            # Recompute target_cells and merges_to_redo with updated row numbers
+            # The milking_split_rows / milking_combine_rows lists (ROBOT wide-
+            # merge handling) were captured BEFORE any rows were inserted, so an
+            # entry for a row that sits below an insertion point is now stale.
+            # Shift each by the number of rows inserted strictly above it so the
+            # end-of-loop re-merge lands on the row the data actually moved to.
+            def _shift_row(orig_row):
+                s = 0
+                for (pos, n) in insertions:
+                    if orig_row >= pos:
+                        s += n
+                return orig_row + s
+            if insertions:
+                milking_split_rows   = [_shift_row(r) for r in milking_split_rows]
+                milking_combine_rows = {_shift_row(r) for r in milking_combine_rows}
+
             target_cells = set()
             for ws_row in irma_ws_rows_all:
                 for col in sheet_write_cols:
                     target_cells.add((ws_row, col))
-            merges_to_redo = []
+
+            # merges_to_redo was captured by Phase A at the ORIGINAL row numbers
+            # (before any rows were inserted) and Phase A already unmerged those
+            # ranges.  Shift each entry to its post-insertion row so it is
+            # restored in the right place.
+            #
+            # NOTE: this block previously did `merges_to_redo = []` and REBUILT
+            # the list from the live merged ranges.  But Phase A had already
+            # removed every farm-row merge that overlaps a write column, so the
+            # rebuilt list captured none of them ? they were never re-merged,
+            # and every exported value (IRMA, milking times, name, location,
+            # ...) collapsed into a single unmerged cell.  We now keep Phase A's
+            # list and only shift it.
+            merges_to_redo = [
+                (_shift_row(r1), c1, _shift_row(r2), c2)
+                for (r1, c1, r2, c2) in merges_to_redo
+            ]
+            # Whatever merges are still live AND overlap a write cell are the
+            # ones we built for the inserted rows (Phase A never saw them).
+            # Capture them at their already-final positions and unmerge so that
+            # writing ? including ROBOT rows that write None into the non-anchor
+            # milking cells of a wide merge ? never targets a read-only merged
+            # cell.  They are restored together with everything else below.
             for merge_range in list(ws.merged_cells.ranges):
                 mr = merge_range
-                overlaps = any(
-                    (r, c) in target_cells
-                    for r in range(mr.min_row, mr.max_row + 1)
-                    for c in range(mr.min_col, mr.max_col + 1)
-                )
-                if overlaps:
+                if any((r, c) in target_cells
+                       for r in range(mr.min_row, mr.max_row + 1)
+                       for c in range(mr.min_col, mr.max_col + 1)):
                     merges_to_redo.append(
                         (mr.min_row, mr.min_col, mr.max_row, mr.max_col))
             for (min_r, min_c, max_r, max_c) in merges_to_redo:
-                ws.unmerge_cells(start_row=min_r, start_column=min_c,
-                                 end_row=max_r,   end_column=max_c)
+                # Phase A entries are already unmerged (unmerging again raises);
+                # live inserted-row merges get unmerged here.
+                try:
+                    ws.unmerge_cells(start_row=min_r, start_column=min_c,
+                                     end_row=max_r,   end_column=max_c)
+                except Exception:
+                    pass
 
             written_rows = set()
             if not hasattr(self, '_export_warnings'):
