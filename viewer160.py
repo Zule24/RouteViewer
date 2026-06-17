@@ -53,7 +53,7 @@ PRELOAD_WASH_MINS        = 75   # wash time added after a preload offload (1h 15
 INTER_PROCESSOR_BREAK    = 10   # break minutes inserted between processor stops
 
 # Farms whose milking windows can be suppressed (e.g. robots / continuous milking)
-NO_MILKING_WINDOW_FARMS = {"37-874", "14-247", "92-545"}
+NO_MILKING_WINDOW_FARMS = {"37-874", "14-247", "92-545", "21-132"}
 
 # Three-window farm data loaded from JSON at startup
 def _load_three_window_farms():
@@ -93,7 +93,8 @@ MWO_COL = next(i for i, (_, k) in enumerate(COLS) if k == "_mwo")
 SOLVER_SKIP_SHEETS = {"1603", "1604",
                       "1531", "1021", "1031", "1071", "1125",
                       "1081", "1451", "1281", "1441", "1121", "1561", "1211",
-                      "1421", "1431", "1023"}
+                      "1421", "1431", "1023",
+                      "1123", "1521", "1551", "1381"}
 
 # Default plant receiving windows (open HH:MM, close HH:MM).
 # None means 24/7 ? no restriction.  Overnight windows (close < open) are
@@ -1387,12 +1388,20 @@ class FileLoader(QThread):
             import time as _time
             _t0 = _time.time()
             self.log.emit(f"[{self.fname}] Opening workbook (data pass)...")
-            wb_data = openpyxl.load_workbook(self.fpath, read_only=False, data_only=True)
+            # read_only=True streams rows lazily instead of building a full
+            # in-memory style/merge cache for every sheet.  On a large
+            # multi-sheet workbook (e.g. 79 sheets) this is the difference
+            # between ~0.5s and ~38s ? read_only=False was the root cause of
+            # "loading stalls" on real route files.  parse_sheet only reads
+            # cell values by coordinate, which works identically in read-only
+            # mode (verified: parsed output is byte-identical aside from the
+            # random _uid field).
+            wb_data = openpyxl.load_workbook(self.fpath, read_only=True, data_only=True)
             self.log.emit(
                 f"[{self.fname}] Data workbook opened in {_time.time()-_t0:.1f}s, "
                 f"opening formula pass...")
             _t1 = _time.time()
-            wb_form = openpyxl.load_workbook(self.fpath, read_only=False, data_only=False)
+            wb_form = openpyxl.load_workbook(self.fpath, read_only=True, data_only=False)
             self.log.emit(
                 f"[{self.fname}] Formula workbook opened in {_time.time()-_t1:.1f}s")
             sheets = {}
@@ -6769,8 +6778,32 @@ class MainWindow(QMainWindow):
         Merged cells are read-only in openpyxl, so we unmerge all spans that
         touch the columns we need to write, write the values into the top-left
         cell of each former span, then re-merge everything afterwards.
+
+        NOTE on load time: openpyxl has no API to load only specific sheets in
+        writable mode ? read_only=False always parses every sheet's full XML
+        plus the shared style table for the entire workbook, regardless of how
+        many sheets we actually modify.  On a large multi-sheet file (e.g. 79
+        route sheets with a heavy shared style table) this load alone can take
+        30+ seconds.  There is no supported way around this short of editing
+        the underlying XML/zip directly, which is out of scope here.  We do
+        take the one optimization that *is* available: data_only=False, since
+        export only writes values and never needs the cached formula results
+        that data_only=True computes.  We also surface progress so a slow
+        export reads as "working" rather than "hung".
         """
-        wb = openpyxl.load_workbook(src_path, read_only=False, data_only=True)
+        if getattr(self, "_debug_text", None) is not None:
+            self._debug_text.append(
+                f"[{fname}] Opening workbook for export (this can take 20-40s "
+                f"on large multi-sheet files)...")
+        import time as _time
+        _t0 = _time.time()
+        # data_only=False: export never reads cached values, only writes ?
+        # skipping data_only avoids computing the formula-value cache openpyxl
+        # builds when data_only=True, which is pure overhead here.
+        wb = openpyxl.load_workbook(src_path, read_only=False, data_only=False)
+        if getattr(self, "_debug_text", None) is not None:
+            self._debug_text.append(
+                f"[{fname}] Workbook opened in {_time.time()-_t0:.1f}s, writing changes...")
 
         WRITE_COLS = {C_IRMA, C_TRAIN, C_M1_START, C_M1_FINISH,
                       C_M2_START, C_M2_FINISH, C_EDPU, C_LOCATION, C_PRIOR_VOL}
@@ -6783,13 +6816,32 @@ class MainWindow(QMainWindow):
             mod_blocks = self._sheet_mods[key]
 
             # -- Map farm row numbers to blocks ---------------------------------
-            # Each IRMA# header in the sheet starts a new block (leg).
-            # We collect the farm row numbers that follow each header so we
-            # can write each block's modified farms into the correct leg's
-            # rows.  The old flat approach (one list of all farm rows in order)
-            # put farms on the wrong leg when the solver moved them between
-            # blocks.
+            # Each IRMA# header in the sheet starts a new block (leg) that HAS
+            # farm rows.  But mod_blocks may have a preload block at index 0
+            # that has NO farm rows (just a dest) and appears before the first
+            # IRMA# header.  If we don't account for that, farm_rows_by_block[0]
+            # ends up holding the FIRST REAL block's farm rows, which then gets
+            # matched against mod_blocks[0] (the preload block) ? an off-by-one
+            # that silently drops every farm's data on export.
+            #
+            # Detect this the same way the dest scan does: if there's a
+            # "Delivery Information" section before the first IRMA# header,
+            # that's a preload block with zero farm rows, and needs a
+            # placeholder entry so list indices line up with mod_blocks.
+            has_preload_block = False
+            for r in range(1, min(ws.max_row, 5000) + 1):
+                val0 = ws.cell(r, C_IRMA).value
+                if isinstance(val0, str) and val0.strip().upper() == "IRMA#":
+                    break   # reached the first real block ? stop looking
+                val2 = ws.cell(r, 2).value
+                if isinstance(val2, str) and "delivery" in val2.lower():
+                    has_preload_block = True
+                    break
+
             farm_rows_by_block = []   # [[excel_row, ...], ...] per block
+            if has_preload_block:
+                farm_rows_by_block.append([])   # placeholder: preload has no farm rows
+
             current_farm_rows  = []
             in_block = False
             for r in range(1, min(ws.max_row, 5000) + 1):
@@ -6823,7 +6875,32 @@ class MainWindow(QMainWindow):
                 for col in sheet_write_cols:
                     target_cells.add((ws_row, col))
 
-            merges_to_redo = []
+            # Build row -> farm dict so we know, before re-merging, whether
+            # each farm row will end up holding a real farm with four
+            # independent milking times, or a "ROBOT" placeholder.
+            # Some sheets use a single wide merge (e.g. E14:P14) spanning all
+            # four milking columns to show one "ROBOT" label instead of four
+            # separate time cells.  If the solver slots a real farm with real
+            # milking windows into that row, re-merging back to the wide span
+            # would silently hide three of its four time values (Excel only
+            # shows the top-left cell of a merge) even though they were
+            # correctly written underneath.  We detect this case and split
+            # the wide merge into the standard four 3-column merges instead,
+            # but only for rows that will hold a real (non-ROBOT) farm.
+            MILKING_COL_LO = C_M1_START
+            row_to_farm = {}
+            for b_idx, block in enumerate(mod_blocks):
+                if b_idx >= len(farm_rows_by_block):
+                    break
+                slot_rows   = farm_rows_by_block[b_idx]
+                block_farms = block.get("rows", [])
+                for i, ws_row in enumerate(slot_rows):
+                    if i < len(block_farms):
+                        row_to_farm[ws_row] = block_farms[i]
+
+            merges_to_redo = []          # restored as-is: (min_r,min_c,max_r,max_c)
+            milking_split_rows = []      # wide merge -> split to standard 4-field
+            milking_combine_rows = set() # standard 4-field -> combine to wide merge
             for merge_range in list(ws.merged_cells.ranges):
                 mr = merge_range
                 overlaps = any(
@@ -6831,14 +6908,76 @@ class MainWindow(QMainWindow):
                     for r in range(mr.min_row, mr.max_row + 1)
                     for c in range(mr.min_col, mr.max_col + 1)
                 )
-                if overlaps:
-                    merges_to_redo.append(
-                        (mr.min_row, mr.min_col, mr.max_row, mr.max_col))
+                if not overlaps:
+                    continue
+
+                # Detect a wide ROBOT-style milking merge: single row, spans
+                # more than the standard 3-column width and covers the whole
+                # milking-time region (M1 start through M2 area).
+                is_wide_milking_merge = (
+                    mr.min_row == mr.max_row and
+                    mr.min_col <= MILKING_COL_LO and
+                    mr.max_col >= C_M2_START and
+                    (mr.max_col - mr.min_col + 1) > 3
+                )
+                if is_wide_milking_merge:
+                    farm = row_to_farm.get(mr.min_row)
+                    is_robot_placeholder = (
+                        farm is not None and
+                        str(farm.get("m1_start", "")).strip().upper() == "ROBOT"
+                    )
+                    if farm is not None and not is_robot_placeholder:
+                        milking_split_rows.append(mr.min_row)
+                        continue   # split instead of restoring ? see below
+
+                # Detect one of the standard 3-column milking merges (the
+                # normal per-field shape).  If a ROBOT farm is being slotted
+                # into this row, we need to combine all four standard merges
+                # into one wide span instead of restoring four separate ones ?
+                # the inverse of the wide-merge-split case above.
+                is_standard_milking_merge = (
+                    mr.min_row == mr.max_row and
+                    mr.min_col in (C_M1_START, C_M1_FINISH, C_M2_START, C_M2_FINISH) and
+                    (mr.max_col - mr.min_col + 1) == 3
+                )
+                if is_standard_milking_merge:
+                    farm = row_to_farm.get(mr.min_row)
+                    if farm is not None and \
+                            str(farm.get("m1_start", "")).strip().upper() == "ROBOT":
+                        milking_combine_rows.add(mr.min_row)
+                        continue   # combine instead of restoring ? see below
+
+                merges_to_redo.append(
+                    (mr.min_row, mr.min_col, mr.max_row, mr.max_col))
 
             for (min_r, min_c, max_r, max_c) in merges_to_redo:
                 ws.unmerge_cells(
                     start_row=min_r, start_column=min_c,
                     end_row=max_r,   end_column=max_c)
+            for row in milking_split_rows:
+                # The wide merge spanned this whole row's milking region ?
+                # unmerging it (already done above via the overlap check would
+                # have skipped it, so do it explicitly here) leaves four plain
+                # cells; we'll re-merge them as four standard 3-column pairs
+                # after writing, instead of restoring the wide span.
+                for mr in list(ws.merged_cells.ranges):
+                    if (mr.min_row == row and mr.max_row == row and
+                            mr.min_col <= MILKING_COL_LO and
+                            mr.max_col >= C_M2_START):
+                        ws.unmerge_cells(start_row=row, start_column=mr.min_col,
+                                         end_row=row,   end_column=mr.max_col)
+                        break
+            for row in milking_combine_rows:
+                # The four standard 3-column merges were skipped above (we
+                # need to combine them into one wide span instead) ? unmerge
+                # each of them explicitly here.
+                for mr in list(ws.merged_cells.ranges):
+                    if (mr.min_row == row and mr.max_row == row and
+                            mr.min_col in (C_M1_START, C_M1_FINISH,
+                                          C_M2_START, C_M2_FINISH) and
+                            (mr.max_col - mr.min_col + 1) == 3):
+                        ws.unmerge_cells(start_row=row, start_column=mr.min_col,
+                                         end_row=row,   end_column=mr.max_col)
 
             # -- Insert rows if any block has more farms than slots -----------
             # Process last-to-first so that earlier blocks' row numbers don't
@@ -6852,6 +6991,18 @@ class MainWindow(QMainWindow):
                 block_farms = mod_blocks[b_idx].get("rows", [])
                 extra = len(block_farms) - len(slot_rows)
                 if extra <= 0:
+                    continue
+                if not slot_rows:
+                    # No existing farm rows to use as a template or insertion
+                    # anchor (e.g. a preload block that never had farm rows in
+                    # the original sheet).  Can't safely fabricate a farm
+                    # section here ? flag it and skip rather than crash.
+                    self._export_warnings = getattr(self, '_export_warnings', [])
+                    self._export_warnings.append(
+                        f"Sheet '{sname}' block {b_idx+1}: solver added "
+                        f"{len(block_farms)} farm(s) to a block that had no "
+                        f"farm rows in the original sheet ? could not write "
+                        f"(no template row available).")
                     continue
 
                 total_inserted[b_idx] = extra
@@ -6938,10 +7089,22 @@ class MainWindow(QMainWindow):
                         _write_cell(ws_row, C_EDPU,      fd.get("edpu", ""))
                         _write_cell(ws_row, C_LOCATION,  fd.get("location", ""))
                         _write_cell(ws_row, C_PRIOR_VOL, fd.get("prior_vol", None))
-                        for col, fkey in [(C_M1_START,"m1_start"),(C_M1_FINISH,"m1_finish"),
-                                          (C_M2_START,"m2_start"),(C_M2_FINISH,"m2_finish")]:
-                            raw = fd.get(fkey, "")
-                            _write_cell(ws_row, col, parse_hhmm(raw) if raw else None)
+                        # ROBOT farms store the literal text "ROBOT" in
+                        # m1_start (with the other three fields blank) to
+                        # represent automated milking with no fixed window.
+                        # parse_hhmm("ROBOT") safely returns None rather than
+                        # crashing, but writing None would silently drop the
+                        # label ? so write it through as plain text instead
+                        # of trying to parse it as a time.
+                        if str(fd.get("m1_start", "")).strip().upper() == "ROBOT":
+                            _write_cell(ws_row, C_M1_START, "ROBOT")
+                            for col in (C_M1_FINISH, C_M2_START, C_M2_FINISH):
+                                _write_cell(ws_row, col, None)
+                        else:
+                            for col, fkey in [(C_M1_START,"m1_start"),(C_M1_FINISH,"m1_finish"),
+                                              (C_M2_START,"m2_start"),(C_M2_FINISH,"m2_finish")]:
+                                raw = fd.get(fkey, "")
+                                _write_cell(ws_row, col, parse_hhmm(raw) if raw else None)
                         extras = fd.get("_extra_cells") or {}
                         for col in extra_cols_in_use:
                             _write_cell(ws_row, col, extras.get(col))
@@ -7040,6 +7203,32 @@ class MainWindow(QMainWindow):
                 ws.merge_cells(
                     start_row=min_r, start_column=min_c,
                     end_row=max_r,   end_column=max_c)
+
+            # Rows where a wide ROBOT-style milking merge was split: re-merge
+            # using the standard four 3-column fields (M1 start/finish,
+            # M2 start/finish) so the real farm's four time values are each
+            # independently visible, instead of restoring the wide span that
+            # would hide three of them under Excel's "only show top-left of
+            # a merge" behaviour.
+            for row in milking_split_rows:
+                ws.merge_cells(start_row=row, start_column=C_M1_START,
+                               end_row=row,   end_column=C_M1_START + 2)
+                ws.merge_cells(start_row=row, start_column=C_M1_FINISH,
+                               end_row=row,   end_column=C_M1_FINISH + 2)
+                ws.merge_cells(start_row=row, start_column=C_M2_START,
+                               end_row=row,   end_column=C_M2_START + 2)
+                ws.merge_cells(start_row=row, start_column=C_M2_FINISH,
+                               end_row=row,   end_column=C_M2_FINISH + 2)
+
+            # Rows where a ROBOT farm was slotted into a row that previously
+            # had the standard four-field merge layout: combine into one wide
+            # merge matching the sheet's ROBOT convention (observed as
+            # C_M1_START through C_M2_FINISH+2, e.g. E:P) so the single
+            # "ROBOT" label displays across the whole milking-time region
+            # instead of leaving four separate (mostly blank) cells.
+            for row in milking_combine_rows:
+                ws.merge_cells(start_row=row, start_column=C_M1_START,
+                               end_row=row,   end_column=C_M2_FINISH + 2)
 
         wb.save(dst_path)
 
