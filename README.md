@@ -1,6 +1,8 @@
-current ver: viewer185
+current ver: viewer186
 
 ver history
+
+186: changed solver to implement duration matrix
 
 185: solver fixes
 
