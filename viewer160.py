@@ -7014,6 +7014,19 @@ class MainWindow(QMainWindow):
                 merges_to_redo.append(
                     (mr.min_row, mr.min_col, mr.max_row, mr.max_col))
 
+            # Snapshot every original single-row merge BEFORE we start
+            # unmerging.  Inserted rows (below) copy their non-milking merge
+            # layout (IRMA / name / location / prior_vol / etc.) from their
+            # block's template row ? but by the time the insertion loop runs,
+            # Phase A has already unmerged all the write-column merges, so
+            # reading them off the live worksheet would miss exactly the ones
+            # we need.  Capture them here while they still exist.
+            orig_row_merges = {}
+            for mr in ws.merged_cells.ranges:
+                if mr.min_row == mr.max_row:
+                    orig_row_merges.setdefault(mr.min_row, []).append(
+                        (mr.min_col, mr.max_col))
+
             for (min_r, min_c, max_r, max_c) in merges_to_redo:
                 ws.unmerge_cells(
                     start_row=min_r, start_column=min_c,
@@ -7089,13 +7102,14 @@ class MainWindow(QMainWindow):
                 # consistent here ? unmerging AFTER insert_rows raises KeyError
                 # on the shifted merged-cell stubs), insert the rows, then
                 # re-merge each captured range `extra` rows lower so the merge
-                # model matches the shifted data.  Also grab the template row's
-                # merges now, before we disturb anything below it.
+                # model matches the shifted data.  The template row's
+                # non-milking merges come from the snapshot taken before Phase A
+                # unmerged them (reading live ranges here would miss every
+                # write-column merge: IRMA, name, location, prior_vol).
                 non_milking_tmpl_merges = [
-                    (mr.min_col, mr.max_col)
-                    for mr in ws.merged_cells.ranges
-                    if mr.min_row == template_row and mr.max_row == template_row
-                    and (mr.max_col < C_M1_START or mr.min_col > C_M2_FINISH + 2)
+                    (c1, c2)
+                    for (c1, c2) in orig_row_merges.get(template_row, [])
+                    if c2 < C_M1_START or c1 > C_M2_FINISH + 2
                 ]
                 below = [
                     (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
@@ -7197,20 +7211,44 @@ class MainWindow(QMainWindow):
             for ws_row in irma_ws_rows_all:
                 for col in sheet_write_cols:
                     target_cells.add((ws_row, col))
-            merges_to_redo = []
+
+            # merges_to_redo was captured by Phase A at the ORIGINAL row numbers
+            # (before any rows were inserted) and Phase A already unmerged those
+            # ranges.  Shift each entry to its post-insertion row so it is
+            # restored in the right place.
+            #
+            # NOTE: this block previously did `merges_to_redo = []` and REBUILT
+            # the list from the live merged ranges.  But Phase A had already
+            # removed every farm-row merge that overlaps a write column, so the
+            # rebuilt list captured none of them ? they were never re-merged,
+            # and every exported value (IRMA, milking times, name, location,
+            # ...) collapsed into a single unmerged cell.  We now keep Phase A's
+            # list and only shift it.
+            merges_to_redo = [
+                (_shift_row(r1), c1, _shift_row(r2), c2)
+                for (r1, c1, r2, c2) in merges_to_redo
+            ]
+            # Whatever merges are still live AND overlap a write cell are the
+            # ones we built for the inserted rows (Phase A never saw them).
+            # Capture them at their already-final positions and unmerge so that
+            # writing ? including ROBOT rows that write None into the non-anchor
+            # milking cells of a wide merge ? never targets a read-only merged
+            # cell.  They are restored together with everything else below.
             for merge_range in list(ws.merged_cells.ranges):
                 mr = merge_range
-                overlaps = any(
-                    (r, c) in target_cells
-                    for r in range(mr.min_row, mr.max_row + 1)
-                    for c in range(mr.min_col, mr.max_col + 1)
-                )
-                if overlaps:
+                if any((r, c) in target_cells
+                       for r in range(mr.min_row, mr.max_row + 1)
+                       for c in range(mr.min_col, mr.max_col + 1)):
                     merges_to_redo.append(
                         (mr.min_row, mr.min_col, mr.max_row, mr.max_col))
             for (min_r, min_c, max_r, max_c) in merges_to_redo:
-                ws.unmerge_cells(start_row=min_r, start_column=min_c,
-                                 end_row=max_r,   end_column=max_c)
+                # Phase A entries are already unmerged (unmerging again raises);
+                # live inserted-row merges get unmerged here.
+                try:
+                    ws.unmerge_cells(start_row=min_r, start_column=min_c,
+                                     end_row=max_r,   end_column=max_c)
+                except Exception:
+                    pass
 
             written_rows = set()
             if not hasattr(self, '_export_warnings'):
