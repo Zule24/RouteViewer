@@ -1,7 +1,9 @@
 
-current ver: viewer190
+current ver: viewer191
 
 ver history
+
+191: solver changes; added shift minimum penalties and execeptions to plant arrival overlap for SAPABB and SAPPOC
 
 190: solver update to allow for penalization of processor arrival overlap
 
