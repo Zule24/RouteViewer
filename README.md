@@ -1,7 +1,9 @@
 
-current ver: viewer197
+current ver: viewer198
 
 ver history
+
+198: solver fixes
 
 197: UI fixes
 
