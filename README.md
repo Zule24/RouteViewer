@@ -1,7 +1,9 @@
 
-current ver: viewer196
+current ver: viewer197
 
 ver history
+
+197: UI fixes
 
 196: icon fixes
 
