@@ -1,7 +1,9 @@
 
-current ver: viewer189
+current ver: viewer190
 
 ver history
+
+190: solver update to allow for penalization of processor arrival overlap
 
 189: export fixes
 
