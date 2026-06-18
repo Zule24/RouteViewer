@@ -2,6 +2,7 @@
 current ver: viewer192
 
 ver history
+
 192: solver changes; allowed for processor arrival overlap in locked sheets to be calculated into solver
 
 191: solver changes; added shift minimum penalties and execeptions to plant arrival overlap for SAPABB and SAPPOC
