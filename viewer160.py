@@ -141,6 +141,19 @@ AVOID_WINDOWS = {
                                        # division needs 7-10pm
 }
 
+# Most processors can only receive one truck at a time ? the overlap penalty
+# and the Processor Schedule chart's red-border highlighting both treat any
+# 2+ simultaneous trucks as a violation by default.  A few processors have
+# multiple unloading bays and can genuinely take more than one truck at once;
+# {dest_key: capacity}.  Any dest_key not listed here defaults to capacity 1.
+# Note this is a CAPACITY, not a blanket exemption ? e.g. with capacity 2,
+# two trucks overlapping is fine, but a third truck overlapping both of them
+# still gets flagged and penalized.
+PROCESSOR_DOCK_CAPACITY = {
+    "972711": 2,   # Saputo Port Coquitlam ? 2 unloading bays
+    "972712": 2,   # Saputo Abbotsford ? 2 unloading bays
+}
+
 # Tray uses the same columns plus a "From Route" column
 TRAY_COLS = COLS + [("Sheet / Route", "_from_route"), ("Type", "_day_colour")]
 
@@ -2255,12 +2268,14 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
     old behaviour exactly.
 
     cfg keys used:
-      orig_dest_vols  ? {dest_key: original_litres}  (group-wide)
-      vol_tol         ? fractional tolerance  (0.15 -> +/-15 %)
-      vol_penalty     ? penalty per litre outside tolerance
-      milking_weight  ? multiplier on milking-wait km-equivalent
-      max_shift_h     ? maximum shift hours before penalty
-      shift_penalty   ? penalty per hour over max_shift_h
+      orig_dest_vols     ? {dest_key: original_litres}  (group-wide)
+      vol_tol            ? fractional tolerance  (0.15 -> +/-15 %)
+      vol_penalty        ? penalty per litre outside tolerance
+      milking_weight     ? multiplier on milking-wait km-equivalent
+      max_shift_h        ? maximum shift hours before penalty
+      shift_penalty      ? penalty per hour over max_shift_h
+      min_shift_h        ? minimum shift hours before penalty
+      shift_under_penalty ? penalty per hour under min_shift_h
     """
     # -- distance --------------------------------------------------------------
     # NOTE: total_km is the literal distance driven ? a separate cost axis from
@@ -2407,6 +2422,18 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
     shift_pen_rate = cfg.get("shift_penalty", 200.0)
     shift_pen      = max(0.0, shift_hours - max_shift) * shift_pen_rate
 
+    # -- shift shortfall penalty -------------------------------------------------
+    # Mirrors the overage penalty above but in the other direction: routes
+    # finishing meaningfully short of a minimum shift length are discouraged
+    # too.  Guarded the same way shift_hours_cost is below ? shift_hours
+    # defaults to 0.0 when there's no start_time (no timing data at all for
+    # this sheet), which would otherwise look like a zero-length shift and
+    # spuriously trigger the full shortfall penalty for every untimed sheet.
+    min_shift            = cfg.get("min_shift_h", 9.0)
+    shift_under_pen_rate = cfg.get("shift_under_penalty", 50.0)
+    shift_under_pen      = (max(0.0, min_shift - shift_hours) * shift_under_pen_rate
+                            if shift_hours > 0 else 0.0)
+
     # -- total shift hours cost ------------------------------------------------
     # A small per-hour cost on the full shift duration (not just the overage).
     # This gives the solver a continuous gradient toward shorter days ? without
@@ -2507,8 +2534,8 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
                             avoid_win_cost += avoid_win_rate
                             break   # one flat hit per stop even if windows overlap
 
-    return (total_km + milking_equiv + vol_pen + shift_pen + shift_hours_cost
-            + cap_pen + plant_win_cost + avoid_win_cost)
+    return (total_km + milking_equiv + vol_pen + shift_pen + shift_under_pen
+            + shift_hours_cost + cap_pen + plant_win_cost + avoid_win_cost)
 
 
 def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
@@ -2603,6 +2630,14 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
     shift_pen    = max(0.0, shift_hours - max_shift) * cfg.get("shift_penalty", 200.0)
     shift_cost   = shift_hours * cfg.get("shift_hours_weight", 0.0)
 
+    # -- shift shortfall ---------------------------------------------------------
+    # Mirrors the overtime penalty above but in the other direction.  Guarded
+    # against shift_hours==0 (no timing data for this sheet) the same way
+    # _sheet_cost is, so an untimed sheet isn't mistaken for a zero-length shift.
+    min_shift        = cfg.get("min_shift_h", 9.0)
+    shift_under_pen  = (max(0.0, min_shift - shift_hours) * cfg.get("shift_under_penalty", 50.0)
+                        if shift_hours > 0 else 0.0)
+
     # -- milking ---------------------------------------------------------------
     milking_equiv = milking_mins * cfg.get("milking_weight", 1.0)
 
@@ -2671,11 +2706,12 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
         "milking":   milking_equiv,
         "shift":     shift_cost,
         "overtime":  shift_pen,
+        "shortfall": shift_under_pen,
         "cap":       cap_pen,
         "plant_win": plant_win_cost,
         "avoid_win": avoid_win_cost,
-        "total":     total_km + milking_equiv + shift_cost + shift_pen + cap_pen
-                     + plant_win_cost + avoid_win_cost,
+        "total":     total_km + milking_equiv + shift_cost + shift_pen + shift_under_pen
+                     + cap_pen + plant_win_cost + avoid_win_cost,
     }
 
 
@@ -2720,7 +2756,7 @@ def _optimize_split_positions(blocks, dm, start_time, cfg, dm_dur=None):
 
 def _sheet_cost_breakdown_state(state, dm, cache, fname, cfg, dm_dur=None):
     """Aggregate _sheet_cost_breakdown across all sheets in a solver state."""
-    totals = {"km":0.0,"milking":0.0,"shift":0.0,"overtime":0.0,"cap":0.0,"plant_win":0.0,"avoid_win":0.0,"total":0.0}
+    totals = {"km":0.0,"milking":0.0,"shift":0.0,"overtime":0.0,"shortfall":0.0,"cap":0.0,"plant_win":0.0,"avoid_win":0.0,"total":0.0}
     for sname, blocks in state:
         entry = cache.get(fname, {}).get(sname, {})
         st    = entry.get("start_time") if isinstance(entry, dict) else None
@@ -3160,8 +3196,8 @@ class ALNSSolver(QThread):
 
     def _group_overlap_penalty(self, state):
         """
-        Penalize overlapping truck visits at the same processor within this
-        colour group.
+        Penalize truck visits at the same processor exceeding that
+        processor's dock capacity within this colour group.
 
         The solver only ever operates on one colour group's sheets at a time
         (RED, BLUE, and GRASSFED run on entirely separate days and are solved
@@ -3171,14 +3207,24 @@ class ALNSSolver(QThread):
         together in `state` in the first place, since `state` only ever
         contains sheets from the one colour group currently being solved.
 
-        cfg["overlap_penalty"]: km-equivalent cost per minute of overlap
-        between two trucks at the same processor.  Default 0.0 ? disabled
-        until explicitly turned on, same as the avoid-window penalty.
+        Most processors can only take one truck at a time, but a few (see
+        PROCESSOR_DOCK_CAPACITY) have multiple bays and can take 2+ at once
+        without it being a real problem ? this is a CAPACITY check via a
+        sweep-line over arrival/departure events, not a simple "any overlap
+        is bad" pairwise check, so e.g. capacity 2 means two trucks
+        overlapping is free, but a third overlapping both of them is not.
+
+        cfg["overlap_penalty"]: km-equivalent cost per minute of capacity
+        EXCESS (concurrent trucks beyond what the dock can take), summed
+        across every processor.  Default 0.0 ? disabled until explicitly
+        turned on, same as the avoid-window penalty.
+        cfg["dock_capacity"]: optional override of PROCESSOR_DOCK_CAPACITY.
         """
         rate = self.cfg.get("overlap_penalty", 0.0)
         if rate <= 0:
             return 0.0
 
+        dock_capacity = self.cfg.get("dock_capacity", PROCESSOR_DOCK_CAPACITY)
         suppress = self.cfg.get("suppress_no_milking", True)
         visits_by_dest = {}   # dest_key -> [(arr_min, dep_min), ...]
 
@@ -3217,20 +3263,32 @@ class ALNSSolver(QThread):
                         dep_m += 24 * 60
                     visits_by_dest.setdefault(dk, []).append((arr_m, dep_m))
 
-        total_overlap_min = 0.0
-        for _dk, vs in visits_by_dest.items():
+        total_excess_min = 0.0
+        for dk, vs in visits_by_dest.items():
             if len(vs) < 2:
                 continue
-            vs.sort()
-            for i in range(len(vs)):
-                for j in range(i + 1, len(vs)):
-                    if vs[j][0] >= vs[i][1]:
-                        break   # sorted by arr ? no later visit overlaps i either
-                    overlap = min(vs[i][1], vs[j][1]) - vs[j][0]
-                    if overlap > 0:
-                        total_overlap_min += overlap
+            capacity = dock_capacity.get(dk, 1)
+            # Sweep-line: +1 at each arrival, -1 at each departure.  Sort by
+            # time, processing departures (-1) before arrivals (+1) at an
+            # exact tie so a truck leaving the instant another arrives isn't
+            # counted as an overlap.  Between consecutive distinct event
+            # times, the concurrent count is constant; whenever it exceeds
+            # capacity, that interval's length times the excess count is
+            # added to the penalty.
+            events = []
+            for (a, d) in vs:
+                events.append((a, 1))
+                events.append((d, -1))
+            events.sort(key=lambda e: (e[0], e[1]))
+            count   = 0
+            prev_t  = None
+            for (t, delta) in events:
+                if prev_t is not None and t > prev_t and count > capacity:
+                    total_excess_min += (count - capacity) * (t - prev_t)
+                count += delta
+                prev_t = t
 
-        return total_overlap_min * rate
+        return total_excess_min * rate
 
     def _group_cost(self, state, orig_dest_vols, sheet_cost_cache=None):
         """Full cost: sum per-sheet costs + group-wide volume penalty.
@@ -4496,7 +4554,7 @@ class ALNSSolver(QThread):
                 self.log.emit(
                     f"  [{colour}] -- it={it+1} --  best={best_cost:.1f}\n"
                     f"    Cost breakdown: km={bd_best['km']:.1f}  shift={bd_best['shift']:.1f}"
-                    f"  shift_pen={bd_best['overtime']:.1f}  milking={bd_best['milking']:.1f}"
+                    f"  shift_pen={bd_best['overtime']:.1f}  shortfall={bd_best['shortfall']:.1f}  milking={bd_best['milking']:.1f}"
                     f"  cap={bd_best['cap']:.1f}  vol_pen={vol_pen_d:.1f}  overlap_pen={overlap_pen_d:.1f}\n"
                     f"    T={T:.2f}  50% accept if deltaZ<{t50:.1f}  10% if deltaZ<{t10:.1f}\n"
                     f"    Accepted/tried (last 50): {('  '.join(acc_parts))}\n"
@@ -4548,7 +4606,7 @@ class ALNSSolver(QThread):
         vol_ok  = "OK" if abs(output_vol - input_vol) < 1 else f"(!) LOST {input_vol - output_vol:,.0f}L"
 
         # Full cost breakdown for the final best state
-        _km_f = _shift_f = _shift_pen_f = _milking_f = _cap_f = _win_f = 0.0
+        _km_f = _shift_f = _shift_pen_f = _shift_under_f = _milking_f = _cap_f = _win_f = 0.0
         for sname_f, blocks_f in best_state:
             entry_f = self.cache.get(self.fname, {}).get(sname_f, {})
             st_f    = entry_f.get("start_time") if isinstance(entry_f, dict) else None
@@ -4562,8 +4620,10 @@ class ALNSSolver(QThread):
                     _base_f = datetime.combine(date.today(), st_f)
                     _sh_f   = (ct_f[1] - _base_f).total_seconds() / 3600.0
                     _max_sh = self.cfg.get("max_shift_h", 12.0)
-                    _shift_f     += _sh_f * self.cfg.get("shift_hours_weight", 0.0)
-                    _shift_pen_f += max(0.0, _sh_f - _max_sh) * self.cfg.get("shift_penalty", 200.0)
+                    _min_sh = self.cfg.get("min_shift_h", 9.0)
+                    _shift_f       += _sh_f * self.cfg.get("shift_hours_weight", 0.0)
+                    _shift_pen_f   += max(0.0, _sh_f - _max_sh) * self.cfg.get("shift_penalty", 200.0)
+                    _shift_under_f += max(0.0, _min_sh - _sh_f) * self.cfg.get("shift_under_penalty", 50.0)
                     for b_f, block_f in enumerate(blocks_f):
                         bt_f = ct_f[0][b_f] if b_f < len(ct_f[0]) else None
                         if not bt_f: continue
@@ -4579,7 +4639,8 @@ class ALNSSolver(QThread):
                 if _rv_f > _hc_f:
                     _cap_f += (_rv_f - _hc_f) * _cr_f
         _vol_pen_f   = _group_vol_penalty(best_state, orig_dest_vols, self.cfg)
-        _plant_win_f = best_cost - _km_f - _shift_f - _shift_pen_f - _milking_f - _cap_f - _vol_pen_f
+        _plant_win_f = (best_cost - _km_f - _shift_f - _shift_pen_f - _shift_under_f
+                        - _milking_f - _cap_f - _vol_pen_f)
 
         self.log.emit(
             f"[{colour}] Done ? best={best_cost:.1f}  "
@@ -4588,7 +4649,7 @@ class ALNSSolver(QThread):
             f"vol: {input_vol:,.0f}->{output_vol:,.0f}L {vol_ok}\n"
             f"  Cost breakdown:\n"
             f"    km={_km_f:.1f}  milking={_milking_f:.1f}  shift={_shift_f:.1f}"
-            f"  overtime={_shift_pen_f:.1f}  cap={_cap_f:.1f}"
+            f"  overtime={_shift_pen_f:.1f}  shortfall={_shift_under_f:.1f}  cap={_cap_f:.1f}"
             f"  plant_win={_plant_win_f:.1f}  vol_pen={_vol_pen_f:.1f}"
         )
 
@@ -4999,23 +5060,41 @@ class ProcessorScheduleWidget(QWidget):
         self._procs = sorted(by_proc.items(),
                              key=lambda kv: kv[1][0]["dest_name"].lower())
 
-        # Overlap detection: within each processor's own visits, sorted by
-        # arrival, flag any pair whose intervals intersect AND whose colour
-        # bucket matches (RED-RED, BLUE-BLUE).  RED and BLUE run on entirely
-        # separate calendar days, so a RED visit and a BLUE visit sharing a
-        # clock time never actually collide in reality even if both happen
-        # to be visible on the same chart ? only same-day pairs count.
-        for _dk, vs in self._procs:
+        # Overlap detection: within each processor's own visits, grouped by
+        # colour bucket (RED-RED, BLUE-BLUE only ? RED and BLUE run on
+        # entirely separate calendar days, so a RED visit and a BLUE visit
+        # sharing a clock time never actually collide in reality even if
+        # both happen to be visible on the same chart), flag any visit that
+        # was present at a moment when the concurrent count at that
+        # processor exceeded its dock capacity.  Most processors take one
+        # truck at a time; a few (PROCESSOR_DOCK_CAPACITY) have multiple
+        # bays, so e.g. capacity 2 means two trucks overlapping is fine but
+        # a third overlapping both of them is flagged.  This mirrors
+        # ALNSSolver._group_overlap_penalty exactly, so the chart's red
+        # borders always match what the solver actually penalizes.
+        for dk, vs in self._procs:
+            capacity = PROCESSOR_DOCK_CAPACITY.get(dk, 1)
+            by_colour = {}
+            for v in vs:
+                by_colour.setdefault(_sheet_colour_bucket(v.get("colour", "")), []).append(v)
+            for _bucket, bucket_vs in by_colour.items():
+                if len(bucket_vs) < 2:
+                    continue
+                events = []
+                for idx, v in enumerate(bucket_vs):
+                    events.append((v["arr_min"], 1, idx))
+                    events.append((v["dep_min"], -1, idx))
+                events.sort(key=lambda e: (e[0], e[1]))
+                active = set()
+                for (_t, delta, idx) in events:
+                    if delta == 1:
+                        active.add(idx)
+                        if len(active) > capacity:
+                            for a_idx in active:
+                                bucket_vs[a_idx]["overlap"] = True
+                    else:
+                        active.discard(idx)
             vs.sort(key=lambda v: v["arr_min"])
-            for i in range(len(vs)):
-                for j in range(i + 1, len(vs)):
-                    if vs[j]["arr_min"] >= vs[i]["dep_min"]:
-                        break
-                    if _sheet_colour_bucket(vs[i].get("colour", "")) != \
-                            _sheet_colour_bucket(vs[j].get("colour", "")):
-                        continue
-                    vs[i]["overlap"] = True
-                    vs[j]["overlap"] = True
 
         all_mins = [v["arr_min"] for _dk, vs in self._procs for v in vs] + \
                    [v["dep_min"] for _dk, vs in self._procs for v in vs]
@@ -5128,7 +5207,7 @@ class ProcessorScheduleWidget(QWidget):
                 txt = (f"{v['dest_name']}\n{v['sname']}\n"
                       f"{_min_to_hhmm(v['arr_min'])} - {_min_to_hhmm(v['dep_min'])}")
                 if v.get("overlap"):
-                    txt += "\n** overlaps another truck at this dock **"
+                    txt += "\n** exceeds this dock's capacity at this time **"
                 QToolTip.showText(event.globalPos(), txt, self)
                 return
         QToolTip.hideText()
@@ -5173,9 +5252,10 @@ class ProcessorScheduleDialog(QDialog):
 
         legend = QLabel(
             "Each box is one truck's time at a processor (arrival to departure). "
-            "Thick red border = overlaps another truck at the same dock on the "
-            "same day. Pink shading = a configured avoid-window for that "
-            "processor. Hover a box for details.")
+            "Thick red border = exceeds that dock's capacity at that moment, "
+            "same day only (most docks take 1 truck at a time; a few take 2 ? "
+            "see PROCESSOR_DOCK_CAPACITY). Pink shading = a configured "
+            "avoid-window for that processor. Hover a box for details.")
         legend.setWordWrap(True)
         layout.addWidget(legend)
 
@@ -5818,14 +5898,18 @@ class MainWindow(QMainWindow):
         self._sw_overlap_pen.setValue(0.0)
         self._sw_overlap_pen.setDecimals(1)
         self._sw_overlap_pen.setToolTip(
-            "Penalty per minute of overlap when two trucks running the SAME\n"
-            "day's routes (both RED, or both BLUE, etc.) are at the same\n"
-            "processor at the same time ? only one truck can unload at a\n"
-            "dock at once.  Since RED/BLUE/GRASSFED run on entirely separate\n"
-            "days and are solved independently, this can never fire between\n"
-            "different colours ? only between two routes of the same colour\n"
-            "group, which is the only case where it's physically possible.\n"
-            "Expressed as km-equivalent per minute of overlap.\n"
+            "Penalty per minute that a processor's dock capacity is exceeded\n"
+            "by trucks running the SAME day's routes (both RED, or both BLUE).\n"
+            "Most docks take 1 truck at a time; a couple (Saputo Port\n"
+            "Coquitlam / Abbotsford) take 2 ? see PROCESSOR_DOCK_CAPACITY.\n"
+            "This is a capacity check, not a blanket no-overlap rule: at a\n"
+            "2-bay dock, two trucks overlapping is free, only a third\n"
+            "overlapping both of them gets penalized.\n"
+            "Since RED/BLUE/GRASSFED run on entirely separate days and are\n"
+            "solved independently, this can never fire between different\n"
+            "colours ? only between routes of the same colour group, which\n"
+            "is the only case where it's physically possible.\n"
+            "Expressed as km-equivalent per minute of capacity excess.\n"
             "Set to 0 to disable (default).")
         obj_l.addWidget(spin_row("Truck overlap pen", self._sw_overlap_pen, "km/min"))
 
@@ -5893,6 +5977,22 @@ class MainWindow(QMainWindow):
         self._sw_shift_pen.setDecimals(0)
         self._sw_shift_pen.setToolTip("Penalty per hour over the max shift limit.")
         con_l.addWidget(spin_row("Shift overage pen", self._sw_shift_pen, "/h"))
+
+        self._sw_min_shift = QDoubleSpinBox()
+        self._sw_min_shift.setRange(0.0, 24.0)
+        self._sw_min_shift.setSingleStep(0.5)
+        self._sw_min_shift.setValue(9.0)
+        self._sw_min_shift.setDecimals(1)
+        self._sw_min_shift.setToolTip("Minimum allowed shift length in hours.")
+        con_l.addWidget(spin_row("Min shift length", self._sw_min_shift, "h"))
+
+        self._sw_shift_under_pen = QDoubleSpinBox()
+        self._sw_shift_under_pen.setRange(0.0, 1000.0)
+        self._sw_shift_under_pen.setSingleStep(10.0)
+        self._sw_shift_under_pen.setValue(50.0)
+        self._sw_shift_under_pen.setDecimals(0)
+        self._sw_shift_under_pen.setToolTip("Penalty per hour under the min shift limit.")
+        con_l.addWidget(spin_row("Shift shortfall pen", self._sw_shift_under_pen, "/h"))
 
         self._sw_shift_hours = QDoubleSpinBox()
         self._sw_shift_hours.setRange(0.0, 100.0)
@@ -6397,6 +6497,8 @@ class MainWindow(QMainWindow):
             "shift_hours_weight":    self._sw_shift_hours.value(),
             "shift_penalty":         self._sw_shift_pen.value(),
             "max_shift_h":           self._sw_max_shift.value(),
+            "min_shift_h":           self._sw_min_shift.value(),
+            "shift_under_penalty":   self._sw_shift_under_pen.value(),
             "cap_penalty":           self._sw_cap_pen.value(),
             "hard_vol_cap":          self._sw_hard_cap.value(),
             "vol_tol":               self._sw_vol_tol.value(),
@@ -6720,6 +6822,8 @@ class MainWindow(QMainWindow):
             "shift_hours_weight":    self._sw_shift_hours.value(),
             "shift_penalty":         self._sw_shift_pen.value(),
             "max_shift_h":           self._sw_max_shift.value(),
+            "min_shift_h":           self._sw_min_shift.value(),
+            "shift_under_penalty":   self._sw_shift_under_pen.value(),
             "cap_penalty":           self._sw_cap_pen.value(),
             "hard_vol_cap":          self._sw_hard_cap.value(),
             "vol_tol":               self._sw_vol_tol.value(),
@@ -6851,6 +6955,8 @@ class MainWindow(QMainWindow):
             "shift_hours_weight":    self._sw_shift_hours.value(),
             "shift_penalty":         self._sw_shift_pen.value(),
             "max_shift_h":           self._sw_max_shift.value(),
+            "min_shift_h":           self._sw_min_shift.value(),
+            "shift_under_penalty":   self._sw_shift_under_pen.value(),
             "cap_penalty":           self._sw_cap_pen.value(),
             "hard_vol_cap":          self._sw_hard_cap.value(),
         }
@@ -8319,6 +8425,8 @@ class MainWindow(QMainWindow):
             "shift_hours_weight":    self._sw_shift_hours.value(),
             "shift_penalty":         self._sw_shift_pen.value(),
             "max_shift_h":           self._sw_max_shift.value(),
+            "min_shift_h":           self._sw_min_shift.value(),
+            "shift_under_penalty":   self._sw_shift_under_pen.value(),
             "cap_penalty":           self._sw_cap_pen.value(),
             "hard_vol_cap":          self._sw_hard_cap.value(),
             "vol_tol":               self._sw_vol_tol.value(),
@@ -8382,6 +8490,8 @@ class MainWindow(QMainWindow):
             "hard_vol_cap":       self._sw_hard_cap.value(),
             "cap_penalty":        self._sw_cap_pen.value(),
             "max_shift_h":        self._sw_max_shift.value(),
+            "min_shift_h":        self._sw_min_shift.value(),
+            "shift_under_penalty":self._sw_shift_under_pen.value(),
             "shift_penalty":      self._sw_shift_pen.value(),
             "shift_hours_weight": self._sw_shift_hours.value(),
             "milking_weight":     self._sw_milking.value(),
@@ -8421,7 +8531,8 @@ class MainWindow(QMainWindow):
             f"  Iterations:     {cfg['iterations']} per group\n"
             f"  Vol tol:        +/-{cfg['vol_tol']*100:.0f}%\n"
             f"  Truck cap:      {cfg['hard_vol_cap']:,} L  (pen {cfg['cap_penalty']:.0f}/L)\n"
-            f"  Max shift:      {cfg['max_shift_h']:.1f} h\n"
+            f"  Max shift:      {cfg['max_shift_h']:.1f} h  (pen {cfg['shift_penalty']:.0f}/h over)\n"
+            f"  Min shift:      {cfg['min_shift_h']:.1f} h  (pen {cfg['shift_under_penalty']:.0f}/h under)\n"
             f"  Shift hrs wt:   {cfg['shift_hours_weight']:.1f}/h\n"
             f"  Milking wt:     {cfg['milking_weight']:.1f}x\n"
             f"  Plant win pen:  {cfg['plant_win_penalty']:.0f} km/h wait  "
@@ -8935,6 +9046,8 @@ class MainWindow(QMainWindow):
             "shift_hours_weight":    self._sw_shift_hours.value(),
             "shift_penalty":         self._sw_shift_pen.value(),
             "max_shift_h":           self._sw_max_shift.value(),
+            "min_shift_h":           self._sw_min_shift.value(),
+            "shift_under_penalty":   self._sw_shift_under_pen.value(),
             "cap_penalty":           self._sw_cap_pen.value(),
             "hard_vol_cap":          self._sw_hard_cap.value(),
             "vol_tol":               self._sw_vol_tol.value(),
