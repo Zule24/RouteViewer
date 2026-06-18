@@ -1,8 +1,9 @@
-https://docs.google.com/spreadsheets/d/1X30uhh2EC7XrYrvzFItgp8TOb9vqz16Qvay0F5lMZ9A/edit?usp=sharing
 
-current ver: viewer187
+current ver: viewer189
 
 ver history
+
+189: export fixes
 
 188: added more knobs for solver and graphs for processor arrival overlaps
 
