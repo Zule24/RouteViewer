@@ -1,7 +1,9 @@
 
-current ver: viewer192
+current ver: viewer193
 
 ver history
+
+193: processor overlap chart improved
 
 192: solver changes; allowed for processor arrival overlap in locked sheets to be calculated into solver
 
