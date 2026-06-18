@@ -7902,41 +7902,159 @@ class MainWindow(QMainWindow):
             # delivery section row numbers to their block index so each
             # block's modified dests land in the correct section.
             DEST_WRITE_COLS = {C_DEST_VOL, C_DEST_NAME, C_DEST_KEY}
+
+            def _scan_dest_rows():
+                """(Re)scan the live worksheet and return {block_idx: [row,...]}
+                of the delivery-section rows belonging to each block.
+
+                Delivery sections use NUMBERED slots ("1.", "2.", "3." in
+                column 1) ? a section can have empty numbered slots (a number
+                but no name/key yet) that are still valid write targets.  The
+                section ends at a non-numbered row (e.g. the "CIP Wash:" row or
+                a blank spacer), NOT at the first empty numbered slot.  This is
+                what gives the export room to write a destination the solver
+                moved onto a block: the empty numbered slots are already there.
+
+                Re-run after inserting rows so the mapping reflects new layout.
+                """
+                out = {}
+                cur_block = -1
+                saw_hdr   = False
+                in_dv     = False
+                acc       = []
+
+                def _flush(bidx, rows):
+                    if rows:
+                        out.setdefault(bidx, []).extend(rows)
+
+                def _is_numbered_slot(v):
+                    # Column-1 slot markers look like "1.", "2.", "10." etc.
+                    if v is None:
+                        return False
+                    s = str(v).strip().rstrip(".")
+                    return s.isdigit()
+
+                for r in range(1, min(ws.max_row, 5000) + 1):
+                    v0 = ws.cell(r, 1).value
+                    v2 = ws.cell(r, 2).value
+                    if isinstance(v0, str) and v0.strip().upper() == "IRMA#":
+                        _flush(cur_block, acc); acc = []; in_dv = False
+                        cur_block += 1; saw_hdr = True
+                    elif isinstance(v2, str) and "delivery" in v2.lower():
+                        _flush(cur_block, acc); acc = []; in_dv = True
+                        if not saw_hdr:
+                            cur_block = 0   # preload block before first IRMA#
+                    elif in_dv:
+                        dn = ws.cell(r, C_DEST_NAME).value
+                        dk = ws.cell(r, C_DEST_KEY).value
+                        # A row belongs to the section if it has dest content OR
+                        # is a numbered (possibly empty) slot.  Anything else
+                        # (wash note, blank spacer) ends the section.
+                        if dn or dk or _is_numbered_slot(v0):
+                            # Skip wash notes that happen to carry a name/key
+                            # (e.g. "WASH AT VTL") ? not a real dest slot.
+                            nm = str(dn or "").lower()
+                            if "wash" in nm:
+                                _flush(cur_block, acc); acc = []; in_dv = False
+                            else:
+                                acc.append(r)
+                        else:
+                            _flush(cur_block, acc); acc = []; in_dv = False
+                _flush(cur_block, acc)
+                return out
+
+            dest_rows_by_block = _scan_dest_rows()
+
+            # -- Insert delivery rows for blocks with more dests than slots ----
+            # When the solver moves a route's end destination onto a block whose
+            # original delivery section has fewer rows than the block now needs,
+            # there is no row to write the extra dest into and it silently
+            # vanishes from the export.  Mirror the farm-overflow fix: insert
+            # the missing delivery rows (cloning the section's last row for
+            # styling/format), handling openpyxl's "insert_rows shifts values
+            # but not merges" quirk, then re-scan so the write loop sees the
+            # complete, correctly-positioned section.  Process sections
+            # last-to-first so earlier row numbers stay valid mid-insertion.
+            dest_insert_plan = []   # (insert_after_row, extra, template_row)
+            for b_idx, block in enumerate(mod_blocks):
+                slot_rows = dest_rows_by_block.get(b_idx, [])
+                if not slot_rows:
+                    continue
+                dests_b = block.get("dests") or []
+                if not dests_b:
+                    dk0 = block.get("dest_key", ""); dn0 = block.get("dest_name", "")
+                    if dk0:
+                        dests_b = [{"key": dk0, "name": dn0, "vol_partial": None}]
+                extra = len(dests_b) - len(slot_rows)
+                if extra > 0:
+                    dest_insert_plan.append((slot_rows[-1], extra, slot_rows[-1]))
+
+            if dest_insert_plan:
+                # Insert from the bottom of the sheet upward so each insertion's
+                # anchor row number is unaffected by later (higher-row) ones.
+                for insert_after, extra, template_row in sorted(
+                        dest_insert_plan, key=lambda t: t[0], reverse=True):
+                    # Snapshot + unmerge every merge below the insertion point,
+                    # insert, then re-merge each shifted down by `extra`.
+                    below = [
+                        (mr.min_row, mr.min_col, mr.max_row, mr.max_col)
+                        for mr in list(ws.merged_cells.ranges)
+                        if mr.min_row > insert_after
+                    ]
+                    # Also capture the template delivery row's own merges so the
+                    # new rows reproduce the section's column layout (name span,
+                    # key span, etc.) rather than being bare cells.
+                    tmpl_merges = [
+                        (mr.min_col, mr.max_col)
+                        for mr in list(ws.merged_cells.ranges)
+                        if mr.min_row == template_row and mr.max_row == template_row
+                    ]
+                    for (mnr, mnc, mxr, mxc) in below:
+                        ws.unmerge_cells(start_row=mnr, start_column=mnc,
+                                         end_row=mxr, end_column=mxc)
+
+                    ws.insert_rows(insert_after + 1, extra)
+
+                    for (mnr, mnc, mxr, mxc) in below:
+                        ws.merge_cells(start_row=mnr + extra, start_column=mnc,
+                                       end_row=mxr + extra, end_column=mxc)
+
+                    # Style/format the new rows from the template delivery row,
+                    # then reproduce its merges on each new row.  Also write a
+                    # numbered-slot marker into column 1 ("4.", "5." ...) so the
+                    # re-scan below recognises these as real delivery slots ?
+                    # otherwise a blank-column-1 inserted row terminates the
+                    # section scan and the new dests are dropped again.
+                    tmpl_slot = ws.cell(template_row, 1).value
+                    try:
+                        base_n = int(str(tmpl_slot).strip().rstrip("."))
+                    except (ValueError, TypeError):
+                        base_n = len(dest_rows_by_block.get(
+                            next((bi for bi, rows in dest_rows_by_block.items()
+                                  if template_row in rows), -1), []))
+                    for offset in range(extra):
+                        new_row = insert_after + 1 + offset
+                        for col in range(1, ws.max_column + 1):
+                            tmpl_cell = ws.cell(template_row, col)
+                            new_cell  = ws.cell(new_row, col)
+                            if tmpl_cell.number_format and \
+                                    tmpl_cell.number_format != "General":
+                                new_cell.number_format = tmpl_cell.number_format
+                            _apply_table_style(new_row, col, src_row=template_row)
+                        # Clear any value cloned styling left and set the slot no.
+                        ws.cell(new_row, 1).value = f"{base_n + offset + 1}."
+                        for (mnc, mxc) in tmpl_merges:
+                            try:
+                                ws.merge_cells(start_row=new_row, start_column=mnc,
+                                               end_row=new_row,   end_column=mxc)
+                            except Exception:
+                                pass
+
+                # Re-scan so dest_rows_by_block reflects every inserted row at
+                # its final position ? no manual offset bookkeeping needed.
+                dest_rows_by_block = _scan_dest_rows()
+
             dest_target = set()
-
-            dest_rows_by_block = {}   # {block_idx: [excel_row, ...]}
-            cur_block_for_dest = -1
-            saw_irma_hdr = False
-            in_deliv = False
-            cur_deliv_rows = []
-
-            def _flush_deliv(bidx, rows):
-                if rows:
-                    dest_rows_by_block.setdefault(bidx, []).extend(rows)
-
-            for r in range(1, min(ws.max_row, 5000) + 1):
-                val0 = ws.cell(r, 1).value
-                val2 = ws.cell(r, 2).value
-                if isinstance(val0, str) and val0.strip().upper() == "IRMA#":
-                    _flush_deliv(cur_block_for_dest, cur_deliv_rows)
-                    cur_deliv_rows = []; in_deliv = False
-                    cur_block_for_dest += 1
-                    saw_irma_hdr = True
-                elif isinstance(val2, str) and "delivery" in val2.lower():
-                    _flush_deliv(cur_block_for_dest, cur_deliv_rows)
-                    cur_deliv_rows = []; in_deliv = True
-                    if not saw_irma_hdr:
-                        cur_block_for_dest = 0   # preload block before first IRMA#
-                elif in_deliv:
-                    dn = ws.cell(r, C_DEST_NAME).value
-                    dk = ws.cell(r, C_DEST_KEY).value
-                    if dn or dk:
-                        cur_deliv_rows.append(r)
-                    else:
-                        _flush_deliv(cur_block_for_dest, cur_deliv_rows)
-                        cur_deliv_rows = []; in_deliv = False
-            _flush_deliv(cur_block_for_dest, cur_deliv_rows)
-
             all_dest_rows = [r for rows in dest_rows_by_block.values() for r in rows]
             for dr in all_dest_rows:
                 for col in DEST_WRITE_COLS:
