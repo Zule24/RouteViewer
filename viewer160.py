@@ -5850,8 +5850,8 @@ class MainWindow(QMainWindow):
         proc_split = QSplitter(Qt.Horizontal)
         for side in ("orig", "mod"):
             w = QWidget(); wl = QVBoxLayout(w); wl.setContentsMargins(0,0,0,0); wl.setSpacing(2)
-            lbl = QLabel("Original ? Processor Volumes" if side=="orig"
-                         else "Modified ? Processor Volumes"); lbl.setFont(bold)
+            lbl = QLabel("Original - Processor Volumes" if side=="orig"
+                         else "Modified - Processor Volumes"); lbl.setFont(bold)
             wl.addWidget(lbl)
             pt = QTableWidget(); self._init_comp_table(pt)
             self._comp_tables[f"proc_{side}"] = pt
@@ -5869,8 +5869,8 @@ class MainWindow(QMainWindow):
         sheet_split = QSplitter(Qt.Horizontal)
         for side in ("orig", "mod"):
             w = QWidget(); wl = QVBoxLayout(w); wl.setContentsMargins(0,0,0,0); wl.setSpacing(2)
-            lbl = QLabel("Original ? Sheet Summary" if side=="orig"
-                         else "Modified ? Sheet Summary"); lbl.setFont(bold)
+            lbl = QLabel("Original - Sheet Summary" if side=="orig"
+                         else "Modified - Sheet Summary"); lbl.setFont(bold)
             wl.addWidget(lbl)
             st = QTableWidget(); self._init_comp_table(st)
             self._comp_tables[f"sheet_{side}"] = st
@@ -6410,7 +6410,7 @@ class MainWindow(QMainWindow):
             "border-radius:3px; font-size:8pt; padding: 0 8px; }")
         plant_win_btn.setToolTip(
             "For every route in the Modified panel, show the plant window penalty\n"
-            "per processor destination ? grouped by processor across all routes.")
+            "per processor destination - grouped by processor across all routes.")
         plant_win_btn.clicked.connect(self._on_plant_window_report)
         trl.addWidget(plant_win_btn)
 
@@ -9582,7 +9582,7 @@ class MainWindow(QMainWindow):
         self._add_proc_key.clear()
         for key in sorted(self._proc_lookup.keys()):
             name = self._proc_lookup[key]
-            self._add_proc_key.addItem(f"{key}  ?  {name}", userData=key)
+            self._add_proc_key.addItem(f"{key}  -  {name}", userData=key)
         self._add_proc_key.lineEdit().setText(current_text)
         self._add_proc_key.blockSignals(False)
 
