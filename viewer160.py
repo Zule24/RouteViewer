@@ -5094,12 +5094,12 @@ class ProcessorScheduleWidget(QWidget):
     app), rather than drawn on top of each other.  Without this, two
     overlapping boxes would occupy the exact same screen space and the
     later-drawn one would completely hide the earlier one's route label ?
-    the opposite of what a chart meant to show overlap should do.  Every
-    processor's row stays the SAME fixed height regardless of how many
-    visits overlap there ? when a row needs more than one lane, each lane
-    gets a proportionally thinner slice of that same fixed row height
-    instead of the row growing taller, so the chart's overall footprint
-    never changes based on how much overlap happens to exist.
+    the opposite of what a chart meant to show overlap should do.  Rows
+    with overlap lanes expand vertically so each lane has at least
+    MIN_LANE_H pixels, keeping bars readable at the cost of a taller
+    chart.  Processor name labels are drawn in a separate frozen column
+    (ProcessorLabelWidget) outside the scroll area so they remain visible
+    during horizontal panning.
 
     visits: list of dicts {dest_key, dest_name, sname, colour, arr_min, dep_min}
             arr_min/dep_min are continuous minutes since a shared reference
@@ -5108,11 +5108,12 @@ class ProcessorScheduleWidget(QWidget):
             the same X position even if one route's day technically started
             "yesterday" relative to the other's wrap point.
     """
-    PX_PER_MIN    = 4
-    ROW_HEIGHT    = 32   # fixed height for every processor row, regardless of overlap
-    LABEL_WIDTH   = 230
-    HEADER_HEIGHT = 28
-    TOP_MARGIN    = 14
+    PX_PER_MIN       = 4
+    ROW_HEIGHT_BASE  = 32   # minimum row height; expands when lanes need more space
+    MIN_LANE_H       = 20   # minimum pixels per lane (rows grow beyond ROW_HEIGHT_BASE)
+    LABEL_WIDTH      = 230
+    HEADER_HEIGHT    = 28
+    TOP_MARGIN       = 14
     MIN_LABEL_LANE_H = 14   # below this lane height, skip the inline text label
 
     def __init__(self, visits, avoid_windows, parent=None):
@@ -5173,8 +5174,8 @@ class ProcessorScheduleWidget(QWidget):
         # colours happening to share a clock time in an "All" view.  Greedy
         # interval-graph colouring: sorted by arrival, reuse the first lane
         # whose previous occupant has already departed, otherwise open a
-        # new lane.  The row stays a fixed height regardless of lane count ?
-        # see paintEvent, where each lane gets height ROW_HEIGHT/lane_count.
+        # new lane.  Row height expands when more lanes are needed so each
+        # lane has at least MIN_LANE_H pixels.
         self._lane_counts = {}   # dest_key -> lanes needed for that row
         for dk, vs in self._procs:
             lane_end = []   # lane_end[i] = departure time of that lane's current occupant
@@ -5191,6 +5192,18 @@ class ProcessorScheduleWidget(QWidget):
                     lane_end.append(v["dep_min"])
             self._lane_counts[dk] = max(1, len(lane_end))
 
+        # Per-row heights: expand when lanes need more than ROW_HEIGHT_BASE
+        cumulative = 0
+        self._row_tops    = {}   # dest_key -> y offset from chart_top
+        self._row_heights = {}   # dest_key -> row height in pixels
+        for dk, _vs in self._procs:
+            lc = self._lane_counts.get(dk, 1)
+            rh = max(self.ROW_HEIGHT_BASE, lc * self.MIN_LANE_H)
+            self._row_tops[dk]    = cumulative
+            self._row_heights[dk] = rh
+            cumulative += rh
+        self._total_rows_h = max(1, cumulative)
+
         all_mins = [v["arr_min"] for _dk, vs in self._procs for v in vs] + \
                    [v["dep_min"] for _dk, vs in self._procs for v in vs]
         if all_mins:
@@ -5199,13 +5212,12 @@ class ProcessorScheduleWidget(QWidget):
         else:
             self._t_min, self._t_max = 0, 24 * 60
 
-        n_rows = max(1, len(self._procs))
-        w = self.LABEL_WIDTH + int((self._t_max - self._t_min) * self.PX_PER_MIN) + 20
-        h = self.HEADER_HEIGHT + self.TOP_MARGIN + n_rows * self.ROW_HEIGHT + 10
+        w = int((self._t_max - self._t_min) * self.PX_PER_MIN) + 20
+        h = self.HEADER_HEIGHT + self.TOP_MARGIN + self._total_rows_h + 10
         self.setMinimumSize(w, h)
 
     def _x_for(self, minute):
-        return self.LABEL_WIDTH + int((minute - self._t_min) * self.PX_PER_MIN)
+        return int((minute - self._t_min) * self.PX_PER_MIN)
 
     def paintEvent(self, _event):
         painter = QPainter(self)
@@ -5221,7 +5233,7 @@ class ProcessorScheduleWidget(QWidget):
             return
 
         chart_top    = self.HEADER_HEIGHT + self.TOP_MARGIN
-        chart_bottom = chart_top + len(self._procs) * self.ROW_HEIGHT
+        chart_bottom = chart_top + self._total_rows_h
         chart_right  = self._x_for(self._t_max)
 
         # -- hour gridlines + axis labels --------------------------------
@@ -5238,8 +5250,9 @@ class ProcessorScheduleWidget(QWidget):
             t += 60
 
         # -- avoid-window shading (behind the visit boxes) ---------------
-        for row_i, (dk, _vs) in enumerate(self._procs):
-            row_top = chart_top + row_i * self.ROW_HEIGHT
+        for dk, _vs in self._procs:
+            row_top = chart_top + self._row_tops[dk]
+            rh      = self._row_heights[dk]
             for (av_start, av_end) in self._avoid_windows.get(dk, []):
                 av_s_min = _hhmm_minutes(av_start)
                 av_e_min = _hhmm_minutes(av_end)
@@ -5253,28 +5266,19 @@ class ProcessorScheduleWidget(QWidget):
                         continue
                     x1 = self._x_for(max(s, self._t_min))
                     x2 = self._x_for(min(e, self._t_max))
-                    painter.fillRect(x1, row_top, max(1, x2 - x1), self.ROW_HEIGHT,
+                    painter.fillRect(x1, row_top, max(1, x2 - x1), rh,
                                      QColor(244, 67, 54, 45))
 
-        # -- row separators, labels, visit boxes --------------------------
-        for row_i, (dk, vs) in enumerate(self._procs):
-            row_top    = chart_top + row_i * self.ROW_HEIGHT
+        # -- row separators and visit boxes (labels drawn by ProcessorLabelWidget) --
+        for dk, vs in self._procs:
+            row_top    = chart_top + self._row_tops[dk]
+            rh         = self._row_heights[dk]
             lane_count = self._lane_counts.get(dk, 1)
-            lane_h     = self.ROW_HEIGHT / lane_count
+            lane_h     = rh / lane_count
 
-            painter.setPen(QPen(QColor("#eeeeee"), 1))
+            painter.setPen(QPen(QColor("#cccccc"), 1))
             painter.drawLine(0, row_top, chart_right, row_top)
 
-            painter.setFont(font_label)
-            painter.setPen(QPen(QColor("#222222"), 1))
-            dest_name = vs[0]["dest_name"]
-            painter.drawText(8, row_top, self.LABEL_WIDTH - 16, self.ROW_HEIGHT,
-                            Qt.AlignVCenter | Qt.AlignLeft, dest_name)
-
-            # Padding shrinks as more lanes have to share the same fixed row
-            # height, so the boxes stay legibly separated even when several
-            # of them are squeezed into the same footprint a single visit
-            # would otherwise have occupied alone.
             pad = 4 if lane_count == 1 else 2
 
             for v in vs:
@@ -5321,6 +5325,82 @@ class ProcessorScheduleWidget(QWidget):
         QToolTip.hideText()
 
 
+class ProcessorLabelWidget(QWidget):
+    """Frozen left column showing processor names, kept in vertical sync
+    with ProcessorScheduleWidget via set_v_offset().
+
+    Placed outside the chart's QScrollArea so it never scrolls horizontally.
+    When the chart scroll area scrolls vertically, its verticalScrollBar
+    valueChanged signal calls set_v_offset() here to shift the label
+    painting by the same amount, keeping each label aligned with its row.
+    """
+    LABEL_WIDTH   = ProcessorScheduleWidget.LABEL_WIDTH
+    HEADER_HEIGHT = ProcessorScheduleWidget.HEADER_HEIGHT
+    TOP_MARGIN    = ProcessorScheduleWidget.TOP_MARGIN
+
+    def __init__(self, procs, row_tops, row_heights, total_rows_h, parent=None):
+        super().__init__(parent)
+        self._procs        = procs
+        self._row_tops     = row_tops
+        self._row_heights  = row_heights
+        self._total_rows_h = total_rows_h
+        self._v_offset     = 0
+        self.setFixedWidth(self.LABEL_WIDTH)
+
+    def set_v_offset(self, v):
+        self._v_offset = v
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+
+        font_label = QFont("Calibri", 9)
+        chart_top  = self.HEADER_HEIGHT + self.TOP_MARGIN
+
+        # y coordinate in widget space where the first row's top edge lands
+        y0 = chart_top - self._v_offset
+
+        # Light header band above the first row (matches the chart's axis area)
+        header_bottom = min(self.height(), max(0, y0))
+        if header_bottom > 0:
+            painter.fillRect(0, 0, self.LABEL_WIDTH, header_bottom, QColor("#f5f5f5"))
+
+        painter.setClipRect(self.rect())
+
+        for dk, vs in self._procs:
+            rh    = self._row_heights.get(dk, 32)
+            row_y = y0 + self._row_tops.get(dk, 0)
+
+            # Skip rows entirely outside the visible area
+            if row_y + rh < 0 or row_y > self.height():
+                continue
+
+            dest_name = vs[0]["dest_name"]
+
+            # Row separator
+            painter.setPen(QPen(QColor("#cccccc"), 1))
+            painter.drawLine(0, row_y, self.LABEL_WIDTH, row_y)
+
+            # Label ? vertically centred within the row
+            painter.setFont(font_label)
+            painter.setPen(QPen(QColor("#222222"), 1))
+            painter.drawText(8, row_y, self.LABEL_WIDTH - 16, rh,
+                             Qt.AlignVCenter | Qt.AlignLeft, dest_name)
+
+        # Bottom border of the last row
+        bottom_y = y0 + self._total_rows_h
+        if 0 <= bottom_y <= self.height():
+            painter.setPen(QPen(QColor("#cccccc"), 1))
+            painter.drawLine(0, bottom_y, self.LABEL_WIDTH, bottom_y)
+
+        # Right border ? visual divider between frozen column and chart
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor("#aaaaaa"), 1))
+        painter.drawLine(self.LABEL_WIDTH - 1, 0, self.LABEL_WIDTH - 1, self.height())
+
+
 def _hhmm_minutes(s):
     """HH:MM string -> minutes since midnight, or None if unparseable."""
     t = parse_hhmm(s)
@@ -5357,13 +5437,13 @@ class ProcessorScheduleDialog(QDialog):
 
         legend = QLabel(
             "Each box is one truck's time at a processor (arrival to departure). "
-            "Overlapping visits split into thinner bars within the same row "
-            "footprint, side by side, so every route number stays visible "
-            "instead of one hiding another. "
-            "Thick red border = exceeds that dock's capacity at that moment, "
-            "same day only (most docks take 1 truck at a time; a few take 2 ? "
+            "Overlapping visits split into taller rows with separate lanes so "
+            "every route number stays readable. "
+            "Thick red border = exceeds dock capacity at that moment, "
+            "same day only (most docks take 1 truck at a time; a few take 2 -- "
             "see PROCESSOR_DOCK_CAPACITY). Pink shading = a configured "
-            "avoid-window for that processor. Hover a box for details.")
+            "avoid-window for that processor. Hover a box for details. "
+            "Processor names stay frozen on the left while scrolling horizontally.")
         legend.setWordWrap(True)
         layout.addWidget(legend)
 
@@ -5394,11 +5474,27 @@ class ProcessorScheduleDialog(QDialog):
         toggle_row.addStretch()
         layout.addLayout(toggle_row)
 
+        # Two-panel chart area: frozen label column left, scrollable chart right
+        chart_panel = QHBoxLayout()
+        chart_panel.setContentsMargins(0, 0, 0, 0)
+        chart_panel.setSpacing(0)
+        layout.addLayout(chart_panel)
+
+        # Left: label column holder (fixed width, not inside a scroll area)
+        self._label_frame = QFrame()
+        self._label_frame.setFixedWidth(ProcessorScheduleWidget.LABEL_WIDTH)
+        self._label_frame_layout = QVBoxLayout(self._label_frame)
+        self._label_frame_layout.setContentsMargins(0, 0, 0, 0)
+        self._label_frame_layout.setSpacing(0)
+        chart_panel.addWidget(self._label_frame)
+
+        # Right: scroll area for the chart content only (no labels)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(False)
-        layout.addWidget(self._scroll)
+        chart_panel.addWidget(self._scroll)
 
         self._chart = None
+        self._label_widget = None
         self._set_filter(None)   # initial build: All
 
         close_row = QHBoxLayout()
@@ -5417,6 +5513,26 @@ class ProcessorScheduleDialog(QDialog):
                        if _sheet_colour_bucket(v.get("colour", "")) == bucket]
         self._chart = ProcessorScheduleWidget(filtered, self._avoid_windows)
         self._scroll.setWidget(self._chart)
+
+        # Rebuild the frozen label column to match the new chart
+        while self._label_frame_layout.count():
+            item = self._label_frame_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._label_widget = ProcessorLabelWidget(
+            self._chart._procs,
+            self._chart._row_tops,
+            self._chart._row_heights,
+            self._chart._total_rows_h,
+        )
+        self._label_frame_layout.addWidget(self._label_widget)
+
+        # Sync vertical scroll: chart scroll drives the label column offset
+        self._scroll.verticalScrollBar().valueChanged.connect(
+            self._label_widget.set_v_offset)
+        # Apply current scroll position immediately (handles filter-switch case)
+        self._label_widget.set_v_offset(
+            self._scroll.verticalScrollBar().value())
 
 
 # -- Main window ---------------------------------------------------------------
@@ -10305,7 +10421,6 @@ class MainWindow(QMainWindow):
         CLR_BLUE_SUB = QColor("#bbdefb")
         CLR_OTH_SUB  = QColor("#e0e0e0")
         sub_colours  = {"RED": CLR_RED_SUB, "BLUE": CLR_BLUE_SUB, "OTHER": CLR_OTH_SUB}
-        dot_colours  = {"RED": "[R]", "BLUE": "[B]", "OTHER": "[O]"}
 
         row_i = 0
         grand_km = 0.0; grand_h = 0.0; grand_ok = True
@@ -10319,7 +10434,7 @@ class MainWindow(QMainWindow):
                 table.setItem(row_i, 0, self._comp_cell(s, bg, font, Qt.AlignLeft|Qt.AlignVCenter))
                 # Colour dot columns
                 for col, b in enumerate(("RED","BLUE","OTHER"), start=1):
-                    dot = "[stop]" if b == bucket else ""
+                    dot = "*" if b == bucket else ""
                     dot_bg = sub_colours[b] if b == bucket else bg
                     table.setItem(row_i, col, self._comp_cell(dot, dot_bg, font, Qt.AlignCenter))
                 if s in sheet_map:
