@@ -5094,9 +5094,12 @@ class ProcessorScheduleWidget(QWidget):
     app), rather than drawn on top of each other.  Without this, two
     overlapping boxes would occupy the exact same screen space and the
     later-drawn one would completely hide the earlier one's route label ?
-    the opposite of what a chart meant to show overlap should do.  A
-    processor's row grows taller only when it actually needs more than one
-    lane; rows with no overlap stay a single lane tall.
+    the opposite of what a chart meant to show overlap should do.  Every
+    processor's row stays the SAME fixed height regardless of how many
+    visits overlap there ? when a row needs more than one lane, each lane
+    gets a proportionally thinner slice of that same fixed row height
+    instead of the row growing taller, so the chart's overall footprint
+    never changes based on how much overlap happens to exist.
 
     visits: list of dicts {dest_key, dest_name, sname, colour, arr_min, dep_min}
             arr_min/dep_min are continuous minutes since a shared reference
@@ -5106,10 +5109,11 @@ class ProcessorScheduleWidget(QWidget):
             "yesterday" relative to the other's wrap point.
     """
     PX_PER_MIN    = 4
-    ROW_HEIGHT    = 32   # height of a single lane
+    ROW_HEIGHT    = 32   # fixed height for every processor row, regardless of overlap
     LABEL_WIDTH   = 230
     HEADER_HEIGHT = 28
     TOP_MARGIN    = 14
+    MIN_LABEL_LANE_H = 14   # below this lane height, skip the inline text label
 
     def __init__(self, visits, avoid_windows, parent=None):
         super().__init__(parent)
@@ -5169,7 +5173,8 @@ class ProcessorScheduleWidget(QWidget):
         # colours happening to share a clock time in an "All" view.  Greedy
         # interval-graph colouring: sorted by arrival, reuse the first lane
         # whose previous occupant has already departed, otherwise open a
-        # new lane.
+        # new lane.  The row stays a fixed height regardless of lane count ?
+        # see paintEvent, where each lane gets height ROW_HEIGHT/lane_count.
         self._lane_counts = {}   # dest_key -> lanes needed for that row
         for dk, vs in self._procs:
             lane_end = []   # lane_end[i] = departure time of that lane's current occupant
@@ -5194,22 +5199,9 @@ class ProcessorScheduleWidget(QWidget):
         else:
             self._t_min, self._t_max = 0, 24 * 60
 
-        # Row tops/heights ? driven by each processor's own lane count, so a
-        # row with genuine overlap takes proportionally more vertical space
-        # and every overlapping box still gets a full, legible lane of its
-        # own, while non-overlapping rows stay exactly as compact as before.
-        self._row_tops    = []
-        self._row_heights = []
-        cursor = 0
-        for dk, _vs in self._procs:
-            row_h = self._lane_counts.get(dk, 1) * self.ROW_HEIGHT
-            self._row_tops.append(cursor)
-            self._row_heights.append(row_h)
-            cursor += row_h
-        total_rows_height = cursor if self._procs else self.ROW_HEIGHT
-
+        n_rows = max(1, len(self._procs))
         w = self.LABEL_WIDTH + int((self._t_max - self._t_min) * self.PX_PER_MIN) + 20
-        h = self.HEADER_HEIGHT + self.TOP_MARGIN + total_rows_height + 10
+        h = self.HEADER_HEIGHT + self.TOP_MARGIN + n_rows * self.ROW_HEIGHT + 10
         self.setMinimumSize(w, h)
 
     def _x_for(self, minute):
@@ -5229,7 +5221,7 @@ class ProcessorScheduleWidget(QWidget):
             return
 
         chart_top    = self.HEADER_HEIGHT + self.TOP_MARGIN
-        chart_bottom = chart_top + self._row_tops[-1] + self._row_heights[-1]
+        chart_bottom = chart_top + len(self._procs) * self.ROW_HEIGHT
         chart_right  = self._x_for(self._t_max)
 
         # -- hour gridlines + axis labels --------------------------------
@@ -5247,8 +5239,7 @@ class ProcessorScheduleWidget(QWidget):
 
         # -- avoid-window shading (behind the visit boxes) ---------------
         for row_i, (dk, _vs) in enumerate(self._procs):
-            row_top = chart_top + self._row_tops[row_i]
-            row_h   = self._row_heights[row_i]
+            row_top = chart_top + row_i * self.ROW_HEIGHT
             for (av_start, av_end) in self._avoid_windows.get(dk, []):
                 av_s_min = _hhmm_minutes(av_start)
                 av_e_min = _hhmm_minutes(av_end)
@@ -5262,42 +5253,50 @@ class ProcessorScheduleWidget(QWidget):
                         continue
                     x1 = self._x_for(max(s, self._t_min))
                     x2 = self._x_for(min(e, self._t_max))
-                    painter.fillRect(x1, row_top, max(1, x2 - x1), row_h,
+                    painter.fillRect(x1, row_top, max(1, x2 - x1), self.ROW_HEIGHT,
                                      QColor(244, 67, 54, 45))
 
         # -- row separators, labels, visit boxes --------------------------
         for row_i, (dk, vs) in enumerate(self._procs):
-            row_top = chart_top + self._row_tops[row_i]
-            row_h   = self._row_heights[row_i]
+            row_top    = chart_top + row_i * self.ROW_HEIGHT
+            lane_count = self._lane_counts.get(dk, 1)
+            lane_h     = self.ROW_HEIGHT / lane_count
+
             painter.setPen(QPen(QColor("#eeeeee"), 1))
             painter.drawLine(0, row_top, chart_right, row_top)
 
             painter.setFont(font_label)
             painter.setPen(QPen(QColor("#222222"), 1))
             dest_name = vs[0]["dest_name"]
-            painter.drawText(8, row_top, self.LABEL_WIDTH - 16, row_h,
+            painter.drawText(8, row_top, self.LABEL_WIDTH - 16, self.ROW_HEIGHT,
                             Qt.AlignVCenter | Qt.AlignLeft, dest_name)
+
+            # Padding shrinks as more lanes have to share the same fixed row
+            # height, so the boxes stay legibly separated even when several
+            # of them are squeezed into the same footprint a single visit
+            # would otherwise have occupied alone.
+            pad = 4 if lane_count == 1 else 2
 
             for v in vs:
                 x1   = self._x_for(v["arr_min"])
                 x2   = self._x_for(v["dep_min"])
                 bw   = max(3, x2 - x1)
                 lane = v.get("_lane", 0)
-                by   = row_top + lane * self.ROW_HEIGHT + 4
-                bh   = self.ROW_HEIGHT - 8
+                by   = int(round(row_top + lane * lane_h + pad))
+                bh   = max(3, int(round(lane_h - 2 * pad)))
                 bg, fg, _ = day_colour_style(v.get("colour", ""))
                 if bg is None:
                     bg = QColor("#90a4ae")
                     fg = QColor("#ffffff")
                 painter.setBrush(bg)
                 if v.get("overlap"):
-                    painter.setPen(QPen(QColor("#d32f2f"), 3))
+                    painter.setPen(QPen(QColor("#d32f2f"), 2 if lane_count > 2 else 3))
                 else:
                     painter.setPen(QPen(QColor("#37474f"), 1))
                 painter.drawRoundedRect(x1, by, bw, bh, 3, 3)
                 self._boxes.append(((x1, by, bw, bh), v))
 
-                if bw > 36:
+                if bw > 36 and lane_h >= self.MIN_LABEL_LANE_H:
                     painter.setPen(QPen(fg, 1))
                     painter.setFont(font_label)
                     painter.drawText(x1 + 3, by, bw - 6, bh,
@@ -5358,8 +5357,9 @@ class ProcessorScheduleDialog(QDialog):
 
         legend = QLabel(
             "Each box is one truck's time at a processor (arrival to departure). "
-            "Overlapping visits are stacked into separate rows within that "
-            "processor so every route number stays visible. "
+            "Overlapping visits split into thinner bars within the same row "
+            "footprint, side by side, so every route number stays visible "
+            "instead of one hiding another. "
             "Thick red border = exceeds that dock's capacity at that moment, "
             "same day only (most docks take 1 truck at a time; a few take 2 ? "
             "see PROCESSOR_DOCK_CAPACITY). Pink shading = a configured "
