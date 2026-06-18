@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QFrame, QHeaderView, QAbstractItemView, QTabWidget, QSplitter,
     QScrollBar, QScrollArea, QDoubleSpinBox, QSpinBox, QProgressBar,
     QGroupBox, QCheckBox, QTextEdit, QSizePolicy, QDialog,
-    QLineEdit, QMessageBox, QFileDialog, QToolTip
+    QLineEdit, QMessageBox, QFileDialog, QToolTip, QButtonGroup
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray
 from PyQt5.QtGui import QFont, QColor, QDrag, QPainter, QPen
@@ -3158,6 +3158,80 @@ class ALNSSolver(QThread):
 
     # -- group-level cost ------------------------------------------------------
 
+    def _group_overlap_penalty(self, state):
+        """
+        Penalize overlapping truck visits at the same processor within this
+        colour group.
+
+        The solver only ever operates on one colour group's sheets at a time
+        (RED, BLUE, and GRASSFED run on entirely separate days and are solved
+        independently ? see _solve_group_inner), so every pair of sheets
+        compared here is automatically from the same day.  There is no need
+        to check colour explicitly: a cross-colour pair can never appear
+        together in `state` in the first place, since `state` only ever
+        contains sheets from the one colour group currently being solved.
+
+        cfg["overlap_penalty"]: km-equivalent cost per minute of overlap
+        between two trucks at the same processor.  Default 0.0 ? disabled
+        until explicitly turned on, same as the avoid-window penalty.
+        """
+        rate = self.cfg.get("overlap_penalty", 0.0)
+        if rate <= 0:
+            return 0.0
+
+        suppress = self.cfg.get("suppress_no_milking", True)
+        visits_by_dest = {}   # dest_key -> [(arr_min, dep_min), ...]
+
+        for sname, blocks in state:
+            entry = self.cache.get(self.fname, {}).get(sname, {})
+            start_time = entry.get("start_time") if isinstance(entry, dict) else None
+            if not start_time:
+                continue
+            ct = calc_times(blocks, self.dm, start_time, self.dm_dur,
+                            suppress_no_milking=suppress)
+            if ct is None:
+                continue
+            all_times, _ = ct
+            for b_idx, block in enumerate(blocks):
+                btimes = all_times[b_idx] if b_idx < len(all_times) else None
+                if not btimes:
+                    continue
+                dests = block.get("dests") or []
+                if not dests:
+                    dk0 = block.get("dest_key", "")
+                    dests = [{"key": dk0}] if dk0 else []
+                for d_i, dest_d in enumerate(dests):
+                    dn = (dest_d.get("name", "") or "")
+                    if "yard for" in dn.lower():
+                        continue   # overnight parking, not a real dock visit
+                    dk = normalise_key(dest_d.get("key", "") or "")
+                    if not dk:
+                        continue
+                    t_idx = _dest_stop_index(block, d_i, b_idx, blocks)
+                    ft = btimes[t_idx] if t_idx < len(btimes) else None
+                    if ft is None or ft.get("arr") is None or ft.get("dep") is None:
+                        continue
+                    arr_m = _continuous_minutes(ft["arr"], start_time)
+                    dep_m = _continuous_minutes(ft["dep"], start_time)
+                    if dep_m < arr_m:
+                        dep_m += 24 * 60
+                    visits_by_dest.setdefault(dk, []).append((arr_m, dep_m))
+
+        total_overlap_min = 0.0
+        for _dk, vs in visits_by_dest.items():
+            if len(vs) < 2:
+                continue
+            vs.sort()
+            for i in range(len(vs)):
+                for j in range(i + 1, len(vs)):
+                    if vs[j][0] >= vs[i][1]:
+                        break   # sorted by arr ? no later visit overlaps i either
+                    overlap = min(vs[i][1], vs[j][1]) - vs[j][0]
+                    if overlap > 0:
+                        total_overlap_min += overlap
+
+        return total_overlap_min * rate
+
     def _group_cost(self, state, orig_dest_vols, sheet_cost_cache=None):
         """Full cost: sum per-sheet costs + group-wide volume penalty.
 
@@ -3177,6 +3251,7 @@ class ALNSSolver(QThread):
                 if sheet_cost_cache is not None:
                     sheet_cost_cache[sname] = c
         total += _group_vol_penalty(state, orig_dest_vols, self.cfg)
+        total += self._group_overlap_penalty(state)
         return total
 
     def _make_sheet_cost_cache(self, state):
@@ -4145,7 +4220,7 @@ class ALNSSolver(QThread):
 
         best_state = copy.deepcopy(state)
         cur_sheet_cache  = self._make_sheet_cost_cache(state)
-        best_cost  = sum(cur_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) - frozen_cost_offset
+        best_cost  = sum(cur_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(state) - frozen_cost_offset
         cur_cost   = best_cost
         best_sheet_cache = dict(cur_sheet_cache)
 
@@ -4334,7 +4409,7 @@ class ALNSSolver(QThread):
                     entry = self.cache[self.fname].get(sn, {})
                     st    = entry.get("start_time") if isinstance(entry, dict) else None
                     new_sheet_cache[sn] = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
-            new_cost = sum(new_sheet_cache.values()) + _group_vol_penalty(new_state, orig_dest_vols, self.cfg) - frozen_cost_offset
+            new_cost = sum(new_sheet_cache.values()) + _group_vol_penalty(new_state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(new_state) - frozen_cost_offset
             delta    = new_cost - cur_cost
 
             # SA acceptance ? compute probability explicitly for diagnostics
@@ -4365,7 +4440,7 @@ class ALNSSolver(QThread):
                                 split_changed = True
                                 new_sheet_cache[sname] = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
                 if split_changed:
-                    cur_cost        = sum(new_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) - frozen_cost_offset
+                    cur_cost        = sum(new_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(state) - frozen_cost_offset
                     cur_sheet_cache = new_sheet_cache
 
                 improved = cur_cost < best_cost
@@ -4391,6 +4466,7 @@ class ALNSSolver(QThread):
             if it % 50 == 49:
                 bd_best = _sheet_cost_breakdown_state(best_state, self.dm, self.cache, self.fname, self.cfg, dm_dur=self.dm_dur)
                 vol_pen_d = _group_vol_penalty(best_state, orig_dest_vols, self.cfg)
+                overlap_pen_d = self._group_overlap_penalty(best_state)
 
                 # Per-processor vol deviation (uses the same offload accounting
                 # as the volume penalty so the displayed numbers always match).
@@ -4421,7 +4497,7 @@ class ALNSSolver(QThread):
                     f"  [{colour}] -- it={it+1} --  best={best_cost:.1f}\n"
                     f"    Cost breakdown: km={bd_best['km']:.1f}  shift={bd_best['shift']:.1f}"
                     f"  shift_pen={bd_best['overtime']:.1f}  milking={bd_best['milking']:.1f}"
-                    f"  cap={bd_best['cap']:.1f}  vol_pen={vol_pen_d:.1f}\n"
+                    f"  cap={bd_best['cap']:.1f}  vol_pen={vol_pen_d:.1f}  overlap_pen={overlap_pen_d:.1f}\n"
                     f"    T={T:.2f}  50% accept if deltaZ<{t50:.1f}  10% if deltaZ<{t10:.1f}\n"
                     f"    Accepted/tried (last 50): {('  '.join(acc_parts))}\n"
                     f"    Cross-route placements (last 50 farm/combined moves): {diag_cross_route}\n"
@@ -4924,13 +5000,20 @@ class ProcessorScheduleWidget(QWidget):
                              key=lambda kv: kv[1][0]["dest_name"].lower())
 
         # Overlap detection: within each processor's own visits, sorted by
-        # arrival, flag any pair whose intervals intersect.
+        # arrival, flag any pair whose intervals intersect AND whose colour
+        # bucket matches (RED-RED, BLUE-BLUE).  RED and BLUE run on entirely
+        # separate calendar days, so a RED visit and a BLUE visit sharing a
+        # clock time never actually collide in reality even if both happen
+        # to be visible on the same chart ? only same-day pairs count.
         for _dk, vs in self._procs:
             vs.sort(key=lambda v: v["arr_min"])
             for i in range(len(vs)):
                 for j in range(i + 1, len(vs)):
                     if vs[j]["arr_min"] >= vs[i]["dep_min"]:
                         break
+                    if _sheet_colour_bucket(vs[i].get("colour", "")) != \
+                            _sheet_colour_bucket(vs[j].get("colour", "")):
+                        continue
                     vs[i]["overlap"] = True
                     vs[j]["overlap"] = True
 
@@ -5066,12 +5149,23 @@ class ProcessorScheduleDialog(QDialog):
     """Shows every truck's visit to every processor across the currently
     loaded file as a Gantt-style chart, built from whatever blocks are
     currently active (solver output if present, original parse otherwise).
+
+    Includes a RED / BLUE / All toggle.  RED and BLUE run on entirely
+    separate calendar days, but a single loaded file's sheets can span both
+    (e.g. a combined "this week" route sheet), so without a filter the chart
+    would show two unrelated days' trucks on one shared axis.  The toggle
+    lets the user view one day's schedule in isolation.  Overlap highlighting
+    already only ever compares visits within the same colour bucket
+    regardless of which toggle is selected (see ProcessorScheduleWidget),
+    so "All" is still safe to use ? it just shows more at once.
     """
 
     def __init__(self, visits, avoid_windows, fname, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Processor Schedule ? {fname}")
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(900, 640)
+        self._all_visits   = visits
+        self._avoid_windows = avoid_windows
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -5079,17 +5173,45 @@ class ProcessorScheduleDialog(QDialog):
 
         legend = QLabel(
             "Each box is one truck's time at a processor (arrival to departure). "
-            "Thick red border = overlaps another truck at the same dock. "
-            "Pink shading = a configured avoid-window for that processor. "
-            "Hover a box for details.")
+            "Thick red border = overlaps another truck at the same dock on the "
+            "same day. Pink shading = a configured avoid-window for that "
+            "processor. Hover a box for details.")
         legend.setWordWrap(True)
         layout.addWidget(legend)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(False)
-        self._chart = ProcessorScheduleWidget(visits, avoid_windows)
-        scroll.setWidget(self._chart)
-        layout.addWidget(scroll)
+        # -- RED / BLUE / All toggle ----------------------------------------
+        toggle_row = QHBoxLayout()
+        toggle_row.addWidget(QLabel("Show:"))
+
+        def _count(bucket):
+            if bucket is None:
+                return len(visits)
+            return sum(1 for v in visits
+                      if _sheet_colour_bucket(v.get("colour", "")) == bucket)
+
+        self._toggle_group = QButtonGroup(self)
+        self._toggle_group.setExclusive(True)
+        self._btn_all  = QPushButton(f"All ({_count(None)})")
+        self._btn_red  = QPushButton(f"RED ({_count('RED')})")
+        self._btn_blue = QPushButton(f"BLUE ({_count('BLUE')})")
+        for b in (self._btn_all, self._btn_red, self._btn_blue):
+            b.setCheckable(True)
+            b.setFixedHeight(24)
+            self._toggle_group.addButton(b)
+            toggle_row.addWidget(b)
+        self._btn_all.setChecked(True)
+        self._btn_all.clicked.connect(lambda: self._set_filter(None))
+        self._btn_red.clicked.connect(lambda: self._set_filter("RED"))
+        self._btn_blue.clicked.connect(lambda: self._set_filter("BLUE"))
+        toggle_row.addStretch()
+        layout.addLayout(toggle_row)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(False)
+        layout.addWidget(self._scroll)
+
+        self._chart = None
+        self._set_filter(None)   # initial build: All
 
         close_row = QHBoxLayout()
         close_row.addStretch()
@@ -5097,6 +5219,16 @@ class ProcessorScheduleDialog(QDialog):
         close_btn.clicked.connect(self.close)
         close_row.addWidget(close_btn)
         layout.addLayout(close_row)
+
+    def _set_filter(self, bucket):
+        """Rebuild the chart for the chosen colour bucket (None = All)."""
+        if bucket is None:
+            filtered = self._all_visits
+        else:
+            filtered = [v for v in self._all_visits
+                       if _sheet_colour_bucket(v.get("colour", "")) == bucket]
+        self._chart = ProcessorScheduleWidget(filtered, self._avoid_windows)
+        self._scroll.setWidget(self._chart)
 
 
 # -- Main window ---------------------------------------------------------------
@@ -5680,6 +5812,23 @@ class MainWindow(QMainWindow):
             "the window at all until this is raised above 0.")
         obj_l.addWidget(spin_row("Avoid-window pen", self._sw_avoid_win_pen, "km flat"))
 
+        self._sw_overlap_pen = QDoubleSpinBox()
+        self._sw_overlap_pen.setRange(0.0, 1000.0)
+        self._sw_overlap_pen.setSingleStep(1.0)
+        self._sw_overlap_pen.setValue(0.0)
+        self._sw_overlap_pen.setDecimals(1)
+        self._sw_overlap_pen.setToolTip(
+            "Penalty per minute of overlap when two trucks running the SAME\n"
+            "day's routes (both RED, or both BLUE, etc.) are at the same\n"
+            "processor at the same time ? only one truck can unload at a\n"
+            "dock at once.  Since RED/BLUE/GRASSFED run on entirely separate\n"
+            "days and are solved independently, this can never fire between\n"
+            "different colours ? only between two routes of the same colour\n"
+            "group, which is the only case where it's physically possible.\n"
+            "Expressed as km-equivalent per minute of overlap.\n"
+            "Set to 0 to disable (default).")
+        obj_l.addWidget(spin_row("Truck overlap pen", self._sw_overlap_pen, "km/min"))
+
         obj_l.addStretch()
         top_l.addWidget(obj_box)
 
@@ -6242,6 +6391,7 @@ class MainWindow(QMainWindow):
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
             "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
+            "overlap_penalty":       self._sw_overlap_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
@@ -6564,6 +6714,7 @@ class MainWindow(QMainWindow):
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
             "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
+            "overlap_penalty":       self._sw_overlap_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
@@ -6828,6 +6979,7 @@ class MainWindow(QMainWindow):
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
             "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
+            "overlap_penalty":       self._sw_overlap_pen.value(),
             "suppress_no_milking": self._suppress_no_milking_cb.isChecked(),
         }
         plant_windows     = cfg.get("plant_windows", {})
@@ -8161,6 +8313,7 @@ class MainWindow(QMainWindow):
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
             "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
+            "overlap_penalty":       self._sw_overlap_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
@@ -8236,6 +8389,7 @@ class MainWindow(QMainWindow):
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
             "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
+            "overlap_penalty":       self._sw_overlap_pen.value(),
             "plant_windows":      plant_windows,
             "iterations":         self._sw_iters.value(),
             "target_cool_frac":   self._sw_cool.value(),
@@ -8775,6 +8929,7 @@ class MainWindow(QMainWindow):
             "plant_win_margin_mins": self._sw_plant_margin_mins.value(),
             "plant_win_margin_rate": self._sw_plant_margin_rate.value(),
             "avoid_window_penalty":  self._sw_avoid_win_pen.value(),
+            "overlap_penalty":       self._sw_overlap_pen.value(),
             "suppress_no_milking":   self._suppress_no_milking_cb.isChecked(),
             "milking_weight":        self._sw_milking.value(),
             "shift_hours_weight":    self._sw_shift_hours.value(),
