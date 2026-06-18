@@ -194,7 +194,50 @@ def get_data_dir():
 
 def fmt_time(v):
     if isinstance(v, dt_time): return f"{v.hour:02d}:{v.minute:02d}"
-    if isinstance(v, str): return v
+    if isinstance(v, str): return _sanitise_time_str(v)
+    return ""
+
+def _sanitise_time_str(s):
+    """Normalise common malformed milking-time strings to HH:MM.
+
+    Handles:
+      "5;00"  -> "5:00"   semicolon separator
+      "5.00"  -> "5:00"   period separator
+      "500"   -> "5:00"   3-digit bare number  (H + MM)
+      "1500"  -> "15:00"  4-digit bare number  (HH + MM)
+      "05:00" -> "05:00"  already correct, pass through
+      "ROBOT" -> "ROBOT"  special keyword, pass through
+      "abc"   -> ""       non-numeric garbage, blanked
+      "5:"    -> ""       incomplete, blanked
+    """
+    if not isinstance(s, str):
+        return s
+    s = s.strip()
+    if not s or s == "-":
+        return s
+    # Special keyword - pass through unchanged
+    if s.upper() == "ROBOT":
+        return s
+    # Semicolon -> colon
+    if ";" in s:
+        s = s.replace(";", ":")
+    # Period -> colon only when both sides are purely digits
+    elif "." in s and ":" not in s:
+        parts = s.split(".")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            s = f"{parts[0]}:{parts[1]}"
+    # Bare digits with no separator
+    if ":" not in s and s.isdigit():
+        if len(s) == 3:
+            s = f"{s[0]}:{s[1:]}"      # "500"  -> "5:00"
+        elif len(s) == 4:
+            s = f"{s[:2]}:{s[2:]}"     # "1500" -> "15:00"
+    # Final validation: must be HH:MM with numeric parts on both sides
+    if ":" in s:
+        parts = s.split(":")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return s
+    # Anything that doesn't look like a valid time gets blanked
     return ""
 
 def extract_year(name):
@@ -216,6 +259,8 @@ def parse_hhmm(s):
     - datetime.time directly (pass-through) - handles cells that openpyxl
       returns as time objects rather than strings on some Excel files.
     - float Excel time serial (fraction of a day) - converts to time.
+    - Common malformed strings normalised via _sanitise_time_str before
+      parsing (e.g. "5;00", "500", "1500").
     """
     if s is None: return None
     if isinstance(s, dt_time): return s
@@ -224,8 +269,9 @@ def parse_hhmm(s):
         total_mins = round(s * 24 * 60)
         return dt_time(total_mins // 60 % 24, total_mins % 60)
     if not s or s == "-": return None
+    s = _sanitise_time_str(str(s))
     try:
-        h, m = str(s).split(":")
+        h, m = s.split(":")
         return dt_time(int(h), int(m))
     except (ValueError, AttributeError):
         return None
@@ -2429,8 +2475,8 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
     # defaults to 0.0 when there's no start_time (no timing data at all for
     # this sheet), which would otherwise look like a zero-length shift and
     # spuriously trigger the full shortfall penalty for every untimed sheet.
-    min_shift            = cfg.get("min_shift_h", 9.0)
-    shift_under_pen_rate = cfg.get("shift_under_penalty", 50.0)
+    min_shift            = cfg.get("min_shift_h", 8.0)
+    shift_under_pen_rate = cfg.get("shift_under_penalty", 30.0)
     shift_under_pen      = (max(0.0, min_shift - shift_hours) * shift_under_pen_rate
                             if shift_hours > 0 else 0.0)
 
@@ -2634,8 +2680,8 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
     # Mirrors the overtime penalty above but in the other direction.  Guarded
     # against shift_hours==0 (no timing data for this sheet) the same way
     # _sheet_cost is, so an untimed sheet isn't mistaken for a zero-length shift.
-    min_shift        = cfg.get("min_shift_h", 9.0)
-    shift_under_pen  = (max(0.0, min_shift - shift_hours) * cfg.get("shift_under_penalty", 50.0)
+    min_shift        = cfg.get("min_shift_h", 8.0)
+    shift_under_pen  = (max(0.0, min_shift - shift_hours) * cfg.get("shift_under_penalty", 30.0)
                         if shift_hours > 0 else 0.0)
 
     # -- milking ---------------------------------------------------------------
@@ -4677,10 +4723,10 @@ class ALNSSolver(QThread):
                     _base_f = datetime.combine(date.today(), st_f)
                     _sh_f   = (ct_f[1] - _base_f).total_seconds() / 3600.0
                     _max_sh = self.cfg.get("max_shift_h", 12.0)
-                    _min_sh = self.cfg.get("min_shift_h", 9.0)
+                    _min_sh = self.cfg.get("min_shift_h", 8.0)
                     _shift_f       += _sh_f * self.cfg.get("shift_hours_weight", 0.0)
                     _shift_pen_f   += max(0.0, _sh_f - _max_sh) * self.cfg.get("shift_penalty", 200.0)
-                    _shift_under_f += max(0.0, _min_sh - _sh_f) * self.cfg.get("shift_under_penalty", 50.0)
+                    _shift_under_f += max(0.0, _min_sh - _sh_f) * self.cfg.get("shift_under_penalty", 30.0)
                     for b_f, block_f in enumerate(blocks_f):
                         bt_f = ct_f[0][b_f] if b_f < len(ct_f[0]) else None
                         if not bt_f: continue
@@ -5464,8 +5510,10 @@ class ProcessorScheduleDialog(QDialog):
 
     def __init__(self, visits, avoid_windows, fname, parent=None):
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(f"Processor Schedule - {fname}")
         self.setMinimumSize(900, 640)
+        self.resize(1400, 800)
         self._all_visits   = visits
         self._avoid_windows = avoid_windows
 
@@ -5967,7 +6015,7 @@ class MainWindow(QMainWindow):
         self._add_m2s    = _fe("M2 Start",62)
         self._add_m2f    = _fe("M2 Fin", 62)
         self._add_edpu   = _fe("EDPU",   50)
-        self._add_loc    = _fe("Location",105)
+        self._add_loc    = _fe("Name",    105)
         self._add_vol    = _fe("Vol (L)", 76)
 
         for w in (self._add_irma, self._add_train,
@@ -9691,7 +9739,9 @@ class MainWindow(QMainWindow):
         IRMA combo with sorted IRMA numbers.  Called whenever a file is loaded.
 
         _irma_lookup: {irma_str: {train, m1_start, m1_finish, m2_start,
-                                   m2_finish, edpu, location}}
+                                   m2_finish, edpu, location, name}}
+        name is taken from _extra_cells[18] (column R - farm name), matching
+        how the route view table displays it.
         Only the most-recently-seen data for each IRMA is kept (all files
         in the session are merged so previous loads stay available).
         """
@@ -9707,6 +9757,8 @@ class MainWindow(QMainWindow):
                         irma = row.get("irma", "").strip()
                         if not irma:
                             continue
+                        farm_name = (row.get("_extra_cells") or {}).get(18, "")
+                        existing  = self._irma_lookup.get(irma, {})
                         self._irma_lookup[irma] = {
                             "train":     row.get("train", ""),
                             "m1_start":  row.get("m1_start", ""),
@@ -9715,6 +9767,7 @@ class MainWindow(QMainWindow):
                             "m2_finish": row.get("m2_finish", ""),
                             "edpu":      row.get("edpu", ""),
                             "location":  row.get("location", ""),
+                            "name":      farm_name or existing.get("name", ""),
                         }
 
         # Repopulate combo (block signals to avoid spurious autofill)
@@ -9739,7 +9792,7 @@ class MainWindow(QMainWindow):
         self._add_m2s.setText(str(data.get("m2_start", "") or ""))
         self._add_m2f.setText(str(data.get("m2_finish", "") or ""))
         self._add_edpu.setText(str(data.get("edpu", "") or ""))
-        self._add_loc.setText(str(data.get("location", "") or ""))
+        self._add_loc.setText(str(data.get("name", "") or data.get("location", "") or ""))
         # Leave vol blank - user always enters that manually
         self._add_vol.setFocus()
 
