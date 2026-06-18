@@ -71,22 +71,30 @@ def _load_three_window_farms():
 THREE_WINDOW_FARMS: dict = {}   # populated in main() after get_data_dir() is available
 
 COLS = [
-    ("IRMA #",       "irma"),
-    ("Proc ID",      "proc_id"),
-    ("Train",        "train"),
-    ("M1 Beg",       "m1_start"),
-    ("M1 End",       "m1_finish"),
-    ("M2 Beg",       "m2_start"),
-    ("M2 End",       "m2_finish"),
-    ("EDPU",         "edpu"),
-    ("Name",         "location"),
-    ("Vol (L)",      "prior_vol"),
-    ("Dist",         "dist"),
-    ("Arr.",         "arr_time"),
-    ("Wait",         "wait_time"),
-    ("Depart",       "dep_time"),
-    ("MWO",          "_mwo"),
+    ("IRMA #",   "irma"),
+    ("Proc ID",  "proc_id"),
+    ("Tr",       "train"),
+    ("M1 Beg",   "m1_start"),
+    ("M1 End",   "m1_finish"),
+    ("M2 Beg",   "m2_start"),
+    ("M2 End",   "m2_finish"),
+    ("E",        "edpu"),
+    ("Name",     "location"),
+    ("Vol (L)",  "prior_vol"),
+    ("Dist",     "dist"),
+    ("Arr.",     "arr_time"),
+    ("Wait",     "wait_time"),
+    ("Dep.",     "dep_time"),
+    ("M",        "_mwo"),
 ]
+
+# Full names shown as tooltips on column headers where the label is abbreviated
+_COL_TIPS = {
+    "train":     "Train",
+    "edpu":      "EDPU",
+    "dep_time":  "Depart",
+    "_mwo":      "Milking Window Override",
+}
 
 MWO_COL = next(i for i, (_, k) in enumerate(COLS) if k == "_mwo")
 
@@ -1492,21 +1500,21 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
     table.resizeRowsToContents()
     hh = table.horizontalHeader()
     _COL_W = {
-        "irma":      68,
-        "proc_id":   52,
-        "train":     34,
-        "m1_start":  48,
-        "m1_finish": 48,
-        "m2_start":  48,
-        "m2_finish": 48,
-        "edpu":      34,
-        "location":  None,   # Stretch - fills all remaining width
-        "prior_vol": 62,
-        "dist":      56,
-        "arr_time":  44,
-        "wait_time": 40,
-        "dep_time":  44,
-        "_mwo":      34,
+        "irma":      64,
+        "proc_id":   50,
+        "train":     24,   # "Tr"  - just Y/N/number
+        "m1_start":  46,
+        "m1_finish": 46,
+        "m2_start":  46,
+        "m2_finish": 46,
+        "edpu":      20,   # "E"   - just N/Y
+        "location":  None, # Stretch - fills all remaining width
+        "prior_vol": 58,
+        "dist":      44,
+        "arr_time":  42,
+        "wait_time": 38,
+        "dep_time":  42,   # "Dep."
+        "_mwo":      20,   # "M"   - checkbox
     }
     for c_idx, (_, key) in enumerate(COLS):
         w = _COL_W.get(key)
@@ -1515,6 +1523,11 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         else:
             hh.setSectionResizeMode(c_idx, QHeaderView.Interactive)
             table.setColumnWidth(c_idx, w)
+        tip = _COL_TIPS.get(key)
+        if tip:
+            item = table.horizontalHeaderItem(c_idx)
+            if item:
+                item.setToolTip(tip)
 
 # -- File loader thread --------------------------------------------------------
 
