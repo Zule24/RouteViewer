@@ -74,14 +74,14 @@ COLS = [
     ("IRMA #",       "irma"),
     ("Proc ID",      "proc_id"),
     ("Train",        "train"),
-    ("M1 Start",     "m1_start"),
-    ("M1 Finish",    "m1_finish"),
-    ("M2 Start",     "m2_start"),
-    ("M2 Finish",    "m2_finish"),
+    ("M1 Beg",       "m1_start"),
+    ("M1 End",       "m1_finish"),
+    ("M2 Beg",       "m2_start"),
+    ("M2 End",       "m2_finish"),
     ("EDPU",         "edpu"),
-    ("Name / Location","location"),
-    ("Prior Vol (L)","prior_vol"),
-    ("Dist to",      "dist"),
+    ("Name",         "location"),
+    ("Vol (L)",      "prior_vol"),
+    ("Dist",         "dist"),
     ("Arr.",         "arr_time"),
     ("Wait",         "wait_time"),
     ("Depart",       "dep_time"),
@@ -1489,18 +1489,32 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
     item = make_header_item(lbl, bg=CLR_SHIFT, fg=QColor("#1a237e"))
     table.setItem(r, 0, item)
 
-    table.resizeColumnsToContents()
+    table.resizeRowsToContents()
     hh = table.horizontalHeader()
+    _COL_W = {
+        "irma":      68,
+        "proc_id":   52,
+        "train":     34,
+        "m1_start":  48,
+        "m1_finish": 48,
+        "m2_start":  48,
+        "m2_finish": 48,
+        "edpu":      34,
+        "location":  None,   # Stretch - fills all remaining width
+        "prior_vol": 62,
+        "dist":      56,
+        "arr_time":  44,
+        "wait_time": 40,
+        "dep_time":  44,
+        "_mwo":      34,
+    }
     for c_idx, (_, key) in enumerate(COLS):
-        if key == "irma":
-            hh.setSectionResizeMode(c_idx, QHeaderView.Fixed)
-            table.setColumnWidth(c_idx, 76)
-        elif key == "dist":
-            hh.setSectionResizeMode(c_idx, QHeaderView.Fixed)
-            table.setColumnWidth(c_idx, 88)
-        elif key == "_mwo":
-            hh.setSectionResizeMode(c_idx, QHeaderView.Fixed)
-            table.setColumnWidth(c_idx, 44)
+        w = _COL_W.get(key)
+        if w is None:
+            hh.setSectionResizeMode(c_idx, QHeaderView.Stretch)
+        else:
+            hh.setSectionResizeMode(c_idx, QHeaderView.Interactive)
+            table.setColumnWidth(c_idx, w)
 
 # -- File loader thread --------------------------------------------------------
 
@@ -6049,6 +6063,7 @@ class MainWindow(QMainWindow):
         self._add_proc_key.lineEdit().setPlaceholderText("Proc Key (e.g. 901012)")
         self._add_proc_key.lineEdit().setFont(field_font)
         self._add_proc_key.activated.connect(self._on_proc_key_autofill)
+        self._add_proc_key.lineEdit().editingFinished.connect(self._on_proc_key_editing_finished)
         self._add_proc_key.view().setMinimumWidth(350)
 
         self._add_proc_name = _fe("Name (e.g. Olympic - FA)", 200)
@@ -8982,7 +8997,8 @@ class MainWindow(QMainWindow):
         t.setSelectionBehavior(QAbstractItemView.SelectRows)
         t.setAlternatingRowColors(False)
         t.verticalHeader().setVisible(False)
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         t.setShowGrid(True)
 
     def _init_comp_table(self, t):
@@ -9838,6 +9854,33 @@ class MainWindow(QMainWindow):
         if name:
             self._add_proc_name.setText(name)
         self._add_proc_vol.setFocus()
+
+    def _on_proc_key_editing_finished(self):
+        """Clean up after the completer fills in 'key  -  name' on Enter keypress.
+
+        QComboBox.activated only fires when the user selects from the visible
+        dropdown.  When the user types a partial key and presses Enter, the
+        inline completer sets the line edit text to the full display string
+        (e.g. '901012  -  Olympic Dairy') without firing activated.  This
+        handler detects that case, strips the name back out of the key field,
+        and fills the name field correctly.
+        """
+        raw = self._add_proc_key.lineEdit().text().strip()
+        if not raw:
+            return
+        # If the completer pasted "key  -  name" into the key field, split it
+        if "  -  " in raw:
+            key, _, name_from_text = raw.partition("  -  ")
+            key  = key.strip()
+            name = name_from_text.strip()
+        else:
+            key  = raw
+            name = getattr(self, "_proc_lookup", {}).get(key, "")
+        # Always reduce the key field to just the bare key
+        self._add_proc_key.lineEdit().setText(key)
+        # Fill the name field only if it is currently empty
+        if name and not self._add_proc_name.text().strip():
+            self._add_proc_name.setText(name)
 
     def _on_add_block(self):
         """
