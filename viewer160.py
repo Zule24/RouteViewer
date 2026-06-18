@@ -3185,6 +3185,13 @@ class ALNSSolver(QThread):
         self.sheet_mods    = sheet_mods or {}
         # locked_sheets: set of sname strings the solver must not modify
         self.locked_sheets = {str(s).strip() for s in (locked_sheets or set())}
+        # Fixed dock-visit background for locked sheets in the colour group
+        # currently being solved ? recomputed once per _solve_group_inner
+        # call (locked sheets never change during a solve, so this is cheap
+        # to compute once rather than per-iteration).  Read by
+        # _group_overlap_penalty so active routes get penalized for
+        # colliding with a locked truck's known, fixed dock time.
+        self._locked_dest_visits = {}   # {dest_key: [(arr_min, dep_min), ...]}
         # Accumulated across all colour groups during run(); read by MainWindow
         # after solving for logging paired trailers held with their lead.
         self.paired_followers = []   # (sname, b_idx, lead_uid, follower_dict, order)
@@ -3193,6 +3200,50 @@ class ALNSSolver(QThread):
         self._stop = True
 
     # -- group-level cost ------------------------------------------------------
+
+    def _extract_dest_visits(self, blocks, start_time):
+        """
+        Return [(dest_key, arr_min, dep_min), ...] for one sheet's blocks ?
+        every real dock visit (yard-for overnight parking excluded), with
+        arr/dep as continuous minutes on the shared axis (see
+        _continuous_minutes).  Shared by _group_overlap_penalty for the
+        active solver state and by the locked-sheet background precomputed
+        in _solve_group_inner, so both use identical extraction logic.
+        """
+        if not start_time:
+            return []
+        suppress = self.cfg.get("suppress_no_milking", True)
+        ct = calc_times(blocks, self.dm, start_time, self.dm_dur,
+                        suppress_no_milking=suppress)
+        if ct is None:
+            return []
+        all_times, _ = ct
+        out = []
+        for b_idx, block in enumerate(blocks):
+            btimes = all_times[b_idx] if b_idx < len(all_times) else None
+            if not btimes:
+                continue
+            dests = block.get("dests") or []
+            if not dests:
+                dk0 = block.get("dest_key", "")
+                dests = [{"key": dk0}] if dk0 else []
+            for d_i, dest_d in enumerate(dests):
+                dn = (dest_d.get("name", "") or "")
+                if "yard for" in dn.lower():
+                    continue   # overnight parking, not a real dock visit
+                dk = normalise_key(dest_d.get("key", "") or "")
+                if not dk:
+                    continue
+                t_idx = _dest_stop_index(block, d_i, b_idx, blocks)
+                ft = btimes[t_idx] if t_idx < len(btimes) else None
+                if ft is None or ft.get("arr") is None or ft.get("dep") is None:
+                    continue
+                arr_m = _continuous_minutes(ft["arr"], start_time)
+                dep_m = _continuous_minutes(ft["dep"], start_time)
+                if dep_m < arr_m:
+                    dep_m += 24 * 60
+                out.append((dk, arr_m, dep_m))
+        return out
 
     def _group_overlap_penalty(self, state):
         """
@@ -3214,6 +3265,18 @@ class ALNSSolver(QThread):
         is bad" pairwise check, so e.g. capacity 2 means two trucks
         overlapping is free, but a third overlapping both of them is not.
 
+        Locked sheets (SOLVER_SKIP_SHEETS or user-locked) are excluded from
+        `state` entirely before solving even starts, so without extra help
+        this function would have zero visibility into where a locked truck
+        is parked ? the solver could happily schedule an active truck right
+        on top of a locked one's known, fixed dock time.  self._locked_dest_visits
+        (precomputed once per colour group in _solve_group_inner, since
+        locked sheets never change during the solve) supplies that fixed
+        background: it's merged in here as additional occupied time at each
+        dock, so active routes get penalized for colliding with a locked
+        route, even though the locked route itself is never touched or
+        re-evaluated.
+
         cfg["overlap_penalty"]: km-equivalent cost per minute of capacity
         EXCESS (concurrent trucks beyond what the dock can take), summed
         across every processor.  Default 0.0 ? disabled until explicitly
@@ -3225,43 +3288,18 @@ class ALNSSolver(QThread):
             return 0.0
 
         dock_capacity = self.cfg.get("dock_capacity", PROCESSOR_DOCK_CAPACITY)
-        suppress = self.cfg.get("suppress_no_milking", True)
         visits_by_dest = {}   # dest_key -> [(arr_min, dep_min), ...]
 
         for sname, blocks in state:
             entry = self.cache.get(self.fname, {}).get(sname, {})
             start_time = entry.get("start_time") if isinstance(entry, dict) else None
-            if not start_time:
-                continue
-            ct = calc_times(blocks, self.dm, start_time, self.dm_dur,
-                            suppress_no_milking=suppress)
-            if ct is None:
-                continue
-            all_times, _ = ct
-            for b_idx, block in enumerate(blocks):
-                btimes = all_times[b_idx] if b_idx < len(all_times) else None
-                if not btimes:
-                    continue
-                dests = block.get("dests") or []
-                if not dests:
-                    dk0 = block.get("dest_key", "")
-                    dests = [{"key": dk0}] if dk0 else []
-                for d_i, dest_d in enumerate(dests):
-                    dn = (dest_d.get("name", "") or "")
-                    if "yard for" in dn.lower():
-                        continue   # overnight parking, not a real dock visit
-                    dk = normalise_key(dest_d.get("key", "") or "")
-                    if not dk:
-                        continue
-                    t_idx = _dest_stop_index(block, d_i, b_idx, blocks)
-                    ft = btimes[t_idx] if t_idx < len(btimes) else None
-                    if ft is None or ft.get("arr") is None or ft.get("dep") is None:
-                        continue
-                    arr_m = _continuous_minutes(ft["arr"], start_time)
-                    dep_m = _continuous_minutes(ft["dep"], start_time)
-                    if dep_m < arr_m:
-                        dep_m += 24 * 60
-                    visits_by_dest.setdefault(dk, []).append((arr_m, dep_m))
+            for (dk, arr_m, dep_m) in self._extract_dest_visits(blocks, start_time):
+                visits_by_dest.setdefault(dk, []).append((arr_m, dep_m))
+
+        # Merge in the fixed locked-sheet background, if any was precomputed.
+        for dk, locked_vs in getattr(self, "_locked_dest_visits", {}).items():
+            if locked_vs:
+                visits_by_dest.setdefault(dk, []).extend(locked_vs)
 
         total_excess_min = 0.0
         for dk, vs in visits_by_dest.items():
@@ -3289,6 +3327,7 @@ class ALNSSolver(QThread):
                 prev_t = t
 
         return total_excess_min * rate
+
 
     def _group_cost(self, state, orig_dest_vols, sheet_cost_cache=None):
         """Full cost: sum per-sheet costs + group-wide volume penalty.
@@ -4098,6 +4137,24 @@ class ALNSSolver(QThread):
         # and causing the vol penalty to dominate and never improve.
         all_skip = SOLVER_SKIP_SHEETS | self.locked_sheets
         locked_in_group = [sn for sn, _ in sheets if sn.strip() in self.locked_sheets]
+
+        # Precompute locked sheets' fixed dock-visit times BEFORE they're
+        # filtered out of `sheets` below.  Locked sheets never change during
+        # this solve, so this only needs to happen once here rather than
+        # inside the per-iteration cost evaluation ? _group_overlap_penalty
+        # reads self._locked_dest_visits to penalize an active route for
+        # colliding with a locked truck's known, fixed dock time, even though
+        # the locked truck itself is never touched.
+        self._locked_dest_visits = {}
+        skipped_entries = [(sn, e) for sn, e in sheets if sn.strip() in all_skip]
+        for sn, e in skipped_entries:
+            if not isinstance(e, dict):
+                continue
+            st_locked = e.get("start_time")
+            blocks_locked = _initial_blocks(sn, e)
+            for (dk, arr_m, dep_m) in self._extract_dest_visits(blocks_locked, st_locked):
+                self._locked_dest_visits.setdefault(dk, []).append((arr_m, dep_m))
+
         sheets = [(sn, e) for sn, e in sheets
                   if sn.strip() not in all_skip]
         if locked_in_group:
