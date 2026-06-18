@@ -1,7 +1,9 @@
 
-current ver: viewer194
+current ver: viewer195
 
 ver history
+
+195: icon fixes
 
 194: processor overlap chart improved
 
