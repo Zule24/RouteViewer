@@ -5756,13 +5756,15 @@ class TruckAvailWidget(QWidget):
 
 class TruckAvailDialog(QDialog):
     """Dialog visualising which day-shift routes return to depot before the
-    night-shift start deadline.
-
-    Computes route end times from calc_times using the current Modified blocks
-    (falling back to original cached blocks if no modifications exist).
+    night-shift start deadline.  Receives pre-computed route timing data
+    so the constructor does no heavy work.
     """
 
-    def __init__(self, cache, fname, dm, dm_dur, cfg, sheet_mods, parent=None):
+    def __init__(self, routes, night_start_mins, parent=None):
+        """
+        routes: list of dicts {sname, colour, start_mins, end_mins, on_time}
+        night_start_mins: int (minutes since midnight) or None
+        """
         super().__init__(parent)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Truck Availability - Day Shift Return Times")
@@ -5773,59 +5775,9 @@ class TruckAvailDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
-        suppress = cfg.get("suppress_no_milking", True)
-
-        # Auto-detect night shift start
-        night_start_mins = None
-        for entry in cache.get(fname, {}).values():
-            if not isinstance(entry, dict):
-                continue
-            st = entry.get("start_time")
-            if st is None or _is_day_sheet(st):
-                continue
-            t = st.time() if isinstance(st, datetime) else st
-            m = t.hour * 60 + t.minute
-            if night_start_mins is None or m < night_start_mins:
-                night_start_mins = m
-
-        # Compute end times for every day route
-        routes = []
-        for sname, entry in cache.get(fname, {}).items():
-            if not isinstance(entry, dict):
-                continue
-            st = entry.get("start_time")
-            if st is None or not _is_day_sheet(st):
-                continue
-            blocks = sheet_mods.get((fname, sname), entry.get("blocks", []))
-            try:
-                ct = calc_times(blocks, dm, st, dm_dur, suppress_no_milking=suppress)
-            except Exception:
-                continue
-            if ct is None:
-                continue
-            _, end_cursor = ct
-            if end_cursor is None:
-                continue
-            t_st  = st.time()        if isinstance(st, datetime)         else st
-            t_end = end_cursor.time() if isinstance(end_cursor, datetime) else end_cursor
-            sm = t_st.hour  * 60 + t_st.minute
-            em = t_end.hour * 60 + t_end.minute
-            if em < sm:
-                em += 24 * 60   # past midnight
-            on_time = night_start_mins is None or em <= night_start_mins
-            routes.append({
-                "sname":      sname,
-                "colour":     entry.get("day_colour", ""),
-                "start_mins": sm,
-                "end_mins":   em,
-                "on_time":    on_time,
-            })
-
-        routes.sort(key=lambda r: r["start_mins"])
         on_time_n = sum(1 for r in routes if r["on_time"])
         total_n   = len(routes)
 
-        # Summary
         if night_start_mins is not None:
             nh, nm = night_start_mins // 60, night_start_mins % 60
             summary = (f"{on_time_n} of {total_n} day routes return before "
@@ -5852,14 +5804,12 @@ class TruckAvailDialog(QDialog):
         leg.addStretch()
         layout.addLayout(leg)
 
-        # Timeline
         scroll = QScrollArea()
         scroll.setWidgetResizable(False)
         timeline = TruckAvailWidget(routes, night_start_mins)
         scroll.setWidget(timeline)
         layout.addWidget(scroll)
 
-        # Close
         row = QHBoxLayout()
         row.addStretch()
         btn = QPushButton("Close")
@@ -9897,16 +9847,62 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No file", "Load a file first.")
             return
         try:
-            cfg = {
-                "suppress_no_milking": (
-                    self._suppress_no_milking_cb.isChecked()
-                    if hasattr(self, "_suppress_no_milking_cb") else True
-                )
-            }
-            dlg = TruckAvailDialog(
-                self._cache, fname, self.dm,
-                getattr(self, "dm_dur", None),
-                cfg, self._sheet_mods, self)
+            suppress = (self._suppress_no_milking_cb.isChecked()
+                        if hasattr(self, "_suppress_no_milking_cb") else True)
+            dm     = self.dm
+            dm_dur = getattr(self, "dm_dur", None)
+            cache  = self._cache
+
+            # Auto-detect night shift start
+            night_start_mins = None
+            for entry in cache.get(fname, {}).values():
+                if not isinstance(entry, dict):
+                    continue
+                st = entry.get("start_time")
+                if st is None or _is_day_sheet(st):
+                    continue
+                t = st.time() if isinstance(st, datetime) else st
+                m = t.hour * 60 + t.minute
+                if night_start_mins is None or m < night_start_mins:
+                    night_start_mins = m
+
+            # Compute end times for every day route
+            routes = []
+            for sname, entry in cache.get(fname, {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                st = entry.get("start_time")
+                if st is None or not _is_day_sheet(st):
+                    continue
+                blocks = self._sheet_mods.get((fname, sname),
+                                              entry.get("blocks", []))
+                try:
+                    ct = calc_times(blocks, dm, st, dm_dur,
+                                    suppress_no_milking=suppress)
+                except Exception:
+                    continue
+                if ct is None:
+                    continue
+                _, end_cursor = ct
+                if end_cursor is None:
+                    continue
+                t_st  = st.time()         if isinstance(st,         datetime) else st
+                t_end = end_cursor.time() if isinstance(end_cursor, datetime) else end_cursor
+                sm = t_st.hour  * 60 + t_st.minute
+                em = t_end.hour * 60 + t_end.minute
+                if em < sm:
+                    em += 24 * 60
+                on_time = night_start_mins is None or em <= night_start_mins
+                routes.append({
+                    "sname":      sname,
+                    "colour":     entry.get("day_colour", ""),
+                    "start_mins": sm,
+                    "end_mins":   em,
+                    "on_time":    on_time,
+                })
+
+            routes.sort(key=lambda r: r["start_mins"])
+            dlg = TruckAvailDialog(routes, night_start_mins, self)
             dlg.exec_()
         except Exception as _exc:
             import traceback as _tb
