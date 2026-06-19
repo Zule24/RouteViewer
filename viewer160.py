@@ -72,7 +72,6 @@ THREE_WINDOW_FARMS: dict = {}   # populated in main() after get_data_dir() is av
 
 COLS = [
     ("IRMA #",   "irma"),
-    ("Proc ID",  "proc_id"),
     ("Tr",       "train"),
     ("M1 Beg",   "m1_start"),
     ("M1 End",   "m1_finish"),
@@ -1385,10 +1384,8 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
 
                 for c_idx, (_, key) in enumerate(COLS):
                     if key == "irma":
-                        item = make_data_item("", bg=dest_bg, draggable=editable)
-                    elif key == "proc_id":
                         item = make_data_item(dest_d.get("key",""), bg=dest_bg,
-                                              align=Qt.AlignCenter, draggable=editable)
+                                             align=Qt.AlignCenter, draggable=editable)
                     elif key == "location":
                         item = make_data_item(loc_str, bg=dest_bg, draggable=editable)
                     elif key == "prior_vol":
@@ -1498,10 +1495,10 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
     table.setItem(r, 0, item)
 
     table.resizeRowsToContents()
+    table.setRowHeight(r, 22)   # cap shift-length row to normal row height
     hh = table.horizontalHeader()
     _COL_W = {
         "irma":      64,
-        "proc_id":   50,
         "train":     24,   # "Tr"  - just Y/N/number
         "m1_start":  46,
         "m1_finish": 46,
@@ -2119,8 +2116,6 @@ class FarmTray(QTableWidget):
                 bg  = CLR_REMOVED; fg = None
             elif key == "dist":
                 val = ""; bg = CLR_REMOVED; fg = None
-            elif key == "proc_id":
-                val = ""; bg = CLR_REMOVED; fg = None
             elif key == "_mwo":
                 val = "OK" if farm_dict.get("_mwo") else ""
                 bg = CLR_REMOVED; fg = None
@@ -2159,8 +2154,6 @@ class FarmTray(QTableWidget):
                 val = label or farm_colour or "-"
                 bg = bg2 if bg2 else CLR_DEST_TRAY; fg = fg2
             elif key == "irma":
-                val = ""; bg = CLR_DEST_TRAY; fg = None
-            elif key == "proc_id":
                 val = dest_dict.get("key",""); bg = CLR_DEST_TRAY; fg = None
             elif key == "location":
                 val = dest_dict.get("name","") or dest_dict.get("key","")
