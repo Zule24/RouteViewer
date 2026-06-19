@@ -5642,10 +5642,10 @@ class TruckAvailWidget(QWidget):
 
         if routes:
             t_min = (min(r["start_mins"] for r in routes) // 60) * 60 - 15
-            t_max = max(
-                (max(r["end_mins"] for r in routes) // 60 + 1) * 60 + 30,
-                ((night_start_mins // 60 + 1) * 60 + 30) if night_start_mins else 0,
-            )
+            t_end_max = (max(r["end_mins"] for r in routes) // 60 + 1) * 60 + 30
+            t_night   = ((night_start_mins // 60 + 1) * 60 + 30
+                         if night_start_mins is not None else 0)
+            t_max = max(t_end_max, t_night)
         else:
             t_min, t_max = 0, 24 * 60
         self._t_min = max(0, t_min)
@@ -5797,7 +5797,10 @@ class TruckAvailDialog(QDialog):
             if st is None or not _is_day_sheet(st):
                 continue
             blocks = sheet_mods.get((fname, sname), entry.get("blocks", []))
-            ct = calc_times(blocks, dm, st, dm_dur, suppress_no_milking=suppress)
+            try:
+                ct = calc_times(blocks, dm, st, dm_dur, suppress_no_milking=suppress)
+            except Exception:
+                continue
             if ct is None:
                 continue
             _, end_cursor = ct
@@ -9893,12 +9896,23 @@ class MainWindow(QMainWindow):
         if not fname or fname not in self._cache:
             QMessageBox.information(self, "No file", "Load a file first.")
             return
-        cfg = {"suppress_no_milking": (self._suppress_no_milking_cb.isChecked()
-                                        if hasattr(self, "_suppress_no_milking_cb") else True)}
-        dlg = TruckAvailDialog(
-            self._cache, fname, self.dm, self.dm_dur, cfg,
-            self._sheet_mods, parent=self)
-        dlg.exec_()
+        try:
+            cfg = {
+                "suppress_no_milking": (
+                    self._suppress_no_milking_cb.isChecked()
+                    if hasattr(self, "_suppress_no_milking_cb") else True
+                )
+            }
+            dlg = TruckAvailDialog(
+                self._cache, fname, self.dm,
+                getattr(self, "dm_dur", None),
+                cfg, self._sheet_mods, parent=self)
+            dlg.exec_()
+        except Exception as _exc:
+            import traceback as _tb
+            QMessageBox.critical(
+                self, "Truck Availability",
+                f"Error opening timeline:\n{_exc}\n\n{_tb.format_exc()}")
 
     def _refresh_truck_avail_label(self, cfg=None):
         """Update the night-start display in the Truck Availability solver panel."""
