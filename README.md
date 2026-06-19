@@ -1,7 +1,9 @@
 
-current ver: viewer202
+current ver: viewer203
 
 ver history
+
+203: solver overhaul to me able to manage day and night routes
 
 202: UI fixes
 
