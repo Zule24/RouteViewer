@@ -1,7 +1,9 @@
 
-current ver: viewer201
+current ver: viewer202
 
 ver history
+
+202: UI fixes
 
 201: UI fixes
 
