@@ -9906,7 +9906,7 @@ class MainWindow(QMainWindow):
             dlg = TruckAvailDialog(
                 self._cache, fname, self.dm,
                 getattr(self, "dm_dur", None),
-                cfg, self._sheet_mods, parent=self)
+                cfg, self._sheet_mods, self)
             dlg.exec_()
         except Exception as _exc:
             import traceback as _tb
