@@ -3477,6 +3477,8 @@ class ALNSSolver(QThread):
 
         shortage = max(0, needed - on_time)
         return shortage * pen_rate
+
+    def _group_cost(self, state, orig_dest_vols, sheet_cost_cache=None):
         """Full cost: sum per-sheet costs + group-wide volume penalty.
 
         sheet_cost_cache: optional dict {sname: cost} - if provided, sheets
