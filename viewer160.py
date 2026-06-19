@@ -95,6 +95,17 @@ _COL_TIPS = {
     "_mwo":      "Milking Window Override",
 }
 
+# Routes starting before this hour (24h clock) are "Day" shifts; from this
+# hour onwards they are "Night" shifts used for the truck-availability constraint.
+DAY_NIGHT_CUTOFF_H = 12
+
+def _is_day_sheet(start_time):
+    """True when the route's start_time is a day shift (before noon)."""
+    if start_time is None:
+        return True
+    t = start_time.time() if isinstance(start_time, datetime) else start_time
+    return t.hour < DAY_NIGHT_CUTOFF_H
+
 MWO_COL = next(i for i, (_, k) in enumerate(COLS) if k == "_mwo")
 
 # Sheet names (exact, case-insensitive) that the solver leaves untouched.
@@ -3394,8 +3405,78 @@ class ALNSSolver(QThread):
 
         return total_excess_min * rate
 
+    def _auto_night_start_mins(self):
+        """Return the earliest start time of any night-shift route in this file
+        as minutes since midnight, or None if no night sheets exist."""
+        earliest = None
+        for entry in self.cache.get(self.fname, {}).values():
+            if not isinstance(entry, dict):
+                continue
+            st = entry.get("start_time")
+            if st is None or _is_day_sheet(st):
+                continue
+            t = st.time() if isinstance(st, datetime) else st
+            m = t.hour * 60 + t.minute
+            if earliest is None or m < earliest:
+                earliest = m
+        return earliest
 
-    def _group_cost(self, state, orig_dest_vols, sheet_cost_cache=None):
+    def _sheet_end_minutes(self, blocks, start_time):
+        """Return a route's depot-return time as minutes since midnight, or None.
+
+        Values > 1440 indicate the route runs past midnight.  Uses calc_times'
+        final cursor so the result is consistent with the shift-cost accounting.
+        """
+        if not start_time:
+            return None
+        suppress = self.cfg.get("suppress_no_milking", True)
+        ct = calc_times(blocks, self.dm, start_time, self.dm_dur,
+                        suppress_no_milking=suppress)
+        if ct is None:
+            return None
+        _, end_cursor = ct
+        if end_cursor is None:
+            return None
+        et = end_cursor.time() if isinstance(end_cursor, datetime) else end_cursor
+        end_m = et.hour * 60 + et.minute
+        # Detect overnight: end clock time < start clock time means +24h
+        st = start_time.time() if isinstance(start_time, datetime) else start_time
+        start_m = st.hour * 60 + st.minute
+        if end_m < start_m:
+            end_m += 24 * 60
+        return end_m
+
+    def _truck_avail_penalty(self, state):
+        """Penalty when too few day-shift trucks finish before the night shift starts.
+
+        cfg keys consumed:
+          truck_avail_enabled       : bool  - master switch
+          truck_avail_night_mins    : int   - night-shift start (minutes, auto-detected)
+          _truck_avail_group_needed : int   - pre-scaled min trucks back for this group
+          truck_avail_penalty       : float - cost per truck short of minimum
+        """
+        if not self.cfg.get("truck_avail_enabled", False):
+            return 0.0
+        night_mins = self.cfg.get("truck_avail_night_mins")
+        needed     = self.cfg.get("_truck_avail_group_needed", 0)
+        pen_rate   = self.cfg.get("truck_avail_penalty", 3000.0)
+        if night_mins is None or needed <= 0:
+            return 0.0
+
+        on_time = 0
+        for sname, blocks in state:
+            entry = self.cache.get(self.fname, {}).get(sname, {})
+            if not isinstance(entry, dict):
+                continue
+            st = entry.get("start_time")
+            if not _is_day_sheet(st):
+                continue
+            end_m = self._sheet_end_minutes(blocks, st)
+            if end_m is not None and end_m <= night_mins:
+                on_time += 1
+
+        shortage = max(0, needed - on_time)
+        return shortage * pen_rate
         """Full cost: sum per-sheet costs + group-wide volume penalty.
 
         sheet_cost_cache: optional dict {sname: cost} - if provided, sheets
@@ -3415,6 +3496,7 @@ class ALNSSolver(QThread):
                     sheet_cost_cache[sname] = c
         total += _group_vol_penalty(state, orig_dest_vols, self.cfg)
         total += self._group_overlap_penalty(state)
+        total += self._truck_avail_penalty(state)
         return total
 
     def _make_sheet_cost_cache(self, state):
@@ -4228,7 +4310,34 @@ class ALNSSolver(QThread):
         if not sheets:
             return {}
 
-        # -- Strip zero-vol farms before solving -------------------------------
+        # -- Truck availability: precompute per-group parameters ---------------
+        if self.cfg.get("truck_avail_enabled", False):
+            night_mins = self._auto_night_start_mins()
+            self.cfg["truck_avail_night_mins"] = night_mins
+            # Day sheets in this group actually being optimised
+            group_day = sum(
+                1 for _, e in sheets
+                if isinstance(e, dict) and _is_day_sheet(e.get("start_time"))
+            )
+            # All day sheets in the file (for proportional scaling across groups)
+            total_day = sum(
+                1 for e in self.cache.get(self.fname, {}).values()
+                if isinstance(e, dict) and _is_day_sheet(e.get("start_time"))
+            )
+            min_back = self.cfg.get("truck_avail_min_back", 8)
+            group_needed = (max(0, round(min_back * group_day / total_day))
+                           if total_day > 0 else 0)
+            self.cfg["_truck_avail_group_needed"] = group_needed
+            if night_mins is not None and group_day > 0:
+                self.log.emit(
+                    f"  [{colour}] Truck avail: night starts "
+                    f"{night_mins // 60:02d}:{night_mins % 60:02d}, "
+                    f"need {group_needed}/{group_day} day trucks back in this group"
+                )
+            elif group_day == 0:
+                self.log.emit(f"  [{colour}] Truck avail: no day shifts in this group")
+        else:
+            self.cfg["_truck_avail_group_needed"] = 0
         # Farms with prior_vol == 0 (or falsy numeric) contribute nothing to
         # collection volume and skew the solver's cost function.  They are
         # -- Adjacent same-IRMA farm pairing -----------------------------------
@@ -5783,6 +5892,13 @@ class MainWindow(QMainWindow):
         self.day_colour_box.setFont(bold)
         self.day_colour_box.setStyleSheet("border-radius: 4px; padding: 2px 6px;")
         ll.addWidget(self.day_colour_box)
+
+        # Day / Night shift badge
+        self.shift_type_box = QLabel("")
+        self.shift_type_box.setAlignment(Qt.AlignCenter)
+        self.shift_type_box.setFixedHeight(22)
+        self.shift_type_box.setStyleSheet("border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
+        ll.addWidget(self.shift_type_box)
         ll.addSpacing(8)
 
         # Timing assumptions box
@@ -6371,7 +6487,46 @@ class MainWindow(QMainWindow):
         con_l.addStretch()
         top_l.addWidget(con_box)
 
-        # -- ALNS Parameters -----------------------------------------------
+        # -- Truck Availability (Day -> Night) ---------------------------------
+        trk_box = QGroupBox("Truck Availability")
+        trk_box.setFont(bold)
+        trk_l = QVBoxLayout(trk_box)
+        trk_l.setSpacing(5)
+        trk_l.setAlignment(Qt.AlignTop)
+
+        self._sw_truck_avail_chk = QCheckBox("Enforce day -> night truck return")
+        self._sw_truck_avail_chk.setToolTip(
+            "Penalise solutions where too few day-shift trucks return\n"
+            "to depot before the earliest night-shift start time.\n"
+            "Night start is auto-detected from the loaded file.\n"
+            "Cutoff: routes starting before noon = Day, noon or later = Night.")
+        trk_l.addWidget(self._sw_truck_avail_chk)
+
+        self._sw_truck_avail_night_lbl = QLabel("Night start: (load a file)")
+        self._sw_truck_avail_night_lbl.setStyleSheet("color: #555555; font-size: 8pt;")
+        trk_l.addWidget(self._sw_truck_avail_night_lbl)
+
+        self._sw_truck_avail_min_back = QSpinBox()
+        self._sw_truck_avail_min_back.setRange(1, 50)
+        self._sw_truck_avail_min_back.setValue(8)
+        self._sw_truck_avail_min_back.setToolTip(
+            "Total number of day-shift trucks that must return before\n"
+            "the night shift starts.  Applied proportionally if RED and\n"
+            "BLUE groups have different numbers of day routes.")
+        trk_l.addWidget(spin_row("Min trucks back", self._sw_truck_avail_min_back))
+
+        self._sw_truck_avail_pen = QDoubleSpinBox()
+        self._sw_truck_avail_pen.setRange(100.0, 99999.0)
+        self._sw_truck_avail_pen.setSingleStep(500.0)
+        self._sw_truck_avail_pen.setValue(3000.0)
+        self._sw_truck_avail_pen.setDecimals(0)
+        self._sw_truck_avail_pen.setToolTip(
+            "Penalty per truck short of the minimum return count.\n"
+            "Set large enough to outweigh typical route-cost differences.")
+        trk_l.addWidget(spin_row("Penalty / missing truck", self._sw_truck_avail_pen))
+
+        trk_l.addStretch()
+        top_l.addWidget(trk_box)
         alns_box = QGroupBox("ALNS Parameters")
         alns_box.setFont(bold)
         alns_l = QVBoxLayout(alns_box)
@@ -8871,7 +9026,13 @@ class MainWindow(QMainWindow):
             "seed":               (self._sw_seed.value() or None),
             "suppress_no_milking": self._suppress_no_milking_cb.isChecked(),
             "split_opt":          hasattr(self, "_chk_split_opt") and self._chk_split_opt.isChecked(),
+            "truck_avail_enabled":  self._sw_truck_avail_chk.isChecked(),
+            "truck_avail_min_back": self._sw_truck_avail_min_back.value(),
+            "truck_avail_penalty":  self._sw_truck_avail_pen.value(),
         }
+
+        # Refresh night-start label before solver runs
+        self._refresh_truck_avail_label(cfg)
 
         total_iters = cfg["iterations"] * 2   # RED + BLUE
         self._solver_progress.setMaximum(total_iters)
@@ -9356,6 +9517,7 @@ class MainWindow(QMainWindow):
         self._refresh_demand_targets()
         self._refresh_locked_sheets_list()
         self._populate_irma_dropdown()
+        self._refresh_truck_avail_label()
         self._populate_proc_dropdown()
         # Optimize partial-dropoff split positions FIRST
         if hasattr(self, "_chk_split_opt") and self._chk_split_opt.isChecked():
@@ -9456,6 +9618,54 @@ class MainWindow(QMainWindow):
             self.day_colour_box.setText("")
             self.day_colour_box.setStyleSheet(
                 "border-radius: 4px; padding: 2px 6px;")
+        self._update_shift_type_badge()
+
+    def _update_shift_type_badge(self):
+        """Show DAY or NIGHT label based on the current sheet's start time."""
+        st = getattr(self, "_driver_start", None)
+        if st is None:
+            self.shift_type_box.setText("")
+            self.shift_type_box.setStyleSheet("border-radius: 3px; padding: 1px 6px;")
+        elif _is_day_sheet(st):
+            self.shift_type_box.setText("DAY")
+            self.shift_type_box.setStyleSheet(
+                "background-color: #f57c00; color: white; font-weight: bold; "
+                "border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
+        else:
+            self.shift_type_box.setText("NIGHT")
+            self.shift_type_box.setStyleSheet(
+                "background-color: #3949ab; color: white; font-weight: bold; "
+                "border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
+
+    def _refresh_truck_avail_label(self, cfg=None):
+        """Update the night-start display in the Truck Availability solver panel."""
+        if not hasattr(self, "_sw_truck_avail_night_lbl"):
+            return
+        fname = self.file_cb.currentText()
+        if not fname or fname not in self._cache:
+            self._sw_truck_avail_night_lbl.setText("Night start: (load a file)")
+            return
+        earliest = None
+        day_count = night_count = 0
+        for entry in self._cache[fname].values():
+            if not isinstance(entry, dict):
+                continue
+            st = entry.get("start_time")
+            if st is None:
+                continue
+            if _is_day_sheet(st):
+                day_count += 1
+            else:
+                night_count += 1
+                t = st.time() if isinstance(st, datetime) else st
+                m = t.hour * 60 + t.minute
+                if earliest is None or m < earliest:
+                    earliest = m
+        parts = []
+        if earliest is not None:
+            parts.append(f"Night starts {earliest // 60:02d}:{earliest % 60:02d}")
+        parts.append(f"{day_count} day / {night_count} night routes")
+        self._sw_truck_avail_night_lbl.setText("  ".join(parts))
 
     def _display_sheet(self):
         fname = self.file_cb.currentText()
