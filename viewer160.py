@@ -5624,7 +5624,248 @@ def _hhmm_minutes(s):
     return t.hour * 60 + t.minute
 
 
-class ProcessorScheduleDialog(QDialog):
+class TruckAvailWidget(QWidget):
+    """Gantt-style timeline: one row per day-shift route, bar from start to
+    depot-return.  A vertical dashed line marks the night-shift start deadline.
+    Green bars finish before the line; red bars run over.
+    """
+    PX_PER_MIN = 4
+    ROW_H      = 30
+    LABEL_W    = 70
+    HEADER_H   = 28
+    PAD        = 4
+
+    def __init__(self, routes, night_start_mins, parent=None):
+        super().__init__(parent)
+        self._routes      = routes           # list of dicts (see TruckAvailDialog)
+        self._night_start = night_start_mins
+
+        if routes:
+            t_min = (min(r["start_mins"] for r in routes) // 60) * 60 - 15
+            t_max = max(
+                (max(r["end_mins"] for r in routes) // 60 + 1) * 60 + 30,
+                ((night_start_mins // 60 + 1) * 60 + 30) if night_start_mins else 0,
+            )
+        else:
+            t_min, t_max = 0, 24 * 60
+        self._t_min = max(0, t_min)
+        self._t_max = t_max
+
+        w = self.LABEL_W + int((self._t_max - self._t_min) * self.PX_PER_MIN) + 20
+        h = self.HEADER_H + len(routes) * self.ROW_H + 10
+        self.setMinimumSize(w, h)
+
+    def _x(self, minute):
+        return self.LABEL_W + int((minute - self._t_min) * self.PX_PER_MIN)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+
+        font_axis  = QFont("Calibri", 8)
+        font_label = QFont("Calibri", 9)
+        font_bold  = QFont("Calibri", 9); font_bold.setBold(True)
+
+        chart_top  = self.HEADER_H
+        chart_bot  = chart_top + len(self._routes) * self.ROW_H
+
+        # Hour gridlines + axis labels
+        painter.setFont(font_axis)
+        t = (self._t_min // 60) * 60
+        while t <= self._t_max:
+            x = self._x(t)
+            painter.setPen(QPen(QColor("#e0e0e0"), 1))
+            painter.drawLine(x, chart_top, x, chart_bot)
+            painter.setPen(QPen(QColor("#555555"), 1))
+            hh = (t // 60) % 24
+            mm = t % 60
+            painter.drawText(x + 2, 2, 52, self.HEADER_H - 4,
+                             Qt.AlignVCenter | Qt.AlignLeft, f"{hh:02d}:{mm:02d}")
+            t += 60
+
+        # Route rows
+        CLR_GREEN  = QColor("#43a047")
+        CLR_RED    = QColor("#e53935")
+        CLR_GBORD  = QColor("#2e7d32")
+        CLR_RBORD  = QColor("#b71c1c")
+        CLR_RED_BG = QColor("#ffcdd2")
+        CLR_BLU_BG = QColor("#bbdefb")
+        CLR_OTH_BG = QColor("#e0e0e0")
+
+        for i, r in enumerate(self._routes):
+            row_top  = chart_top + i * self.ROW_H
+            on_time  = r["on_time"]
+
+            # Row background
+            bg = QColor("#f8f8f8") if i % 2 == 0 else QColor("#ffffff")
+            painter.fillRect(0, row_top, self.width(), self.ROW_H, bg)
+
+            # Colour-coded name label
+            lbl_bg = (CLR_RED_BG if r["colour"] == "RED" else
+                      CLR_BLU_BG if r["colour"] == "BLUE" else CLR_OTH_BG)
+            painter.fillRect(0, row_top, self.LABEL_W, self.ROW_H, lbl_bg)
+            painter.setFont(font_bold)
+            painter.setPen(QPen(QColor("#222222"), 1))
+            painter.drawText(4, row_top, self.LABEL_W - 8, self.ROW_H,
+                             Qt.AlignVCenter | Qt.AlignLeft, r["sname"])
+
+            # Shift bar
+            x1 = self._x(r["start_mins"])
+            x2 = self._x(r["end_mins"])
+            bw = max(4, x2 - x1)
+            by = row_top + self.PAD
+            bh = self.ROW_H - 2 * self.PAD
+
+            painter.setBrush(CLR_GREEN if on_time else CLR_RED)
+            painter.setPen(QPen(CLR_GBORD if on_time else CLR_RBORD, 1))
+            painter.drawRoundedRect(x1, by, bw, bh, 3, 3)
+
+            # Return time label inside bar
+            if bw > 44:
+                end_hh = (r["end_mins"] // 60) % 24
+                end_mm = r["end_mins"] % 60
+                painter.setPen(QPen(QColor("#ffffff"), 1))
+                painter.setFont(font_label)
+                painter.drawText(x1 + 3, by, bw - 6, bh,
+                                 Qt.AlignVCenter | Qt.AlignRight,
+                                 f"{end_hh:02d}:{end_mm:02d}")
+
+            # Row separator
+            painter.setPen(QPen(QColor("#cccccc"), 1))
+            painter.drawLine(0, row_top, self.width(), row_top)
+
+        # Night-shift start line
+        if self._night_start is not None:
+            xn = self._x(self._night_start)
+            pen = QPen(QColor("#1565c0"), 2, Qt.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(xn, 0, xn, chart_bot)
+            painter.setFont(font_bold)
+            painter.setPen(QPen(QColor("#1565c0"), 1))
+            nh = (self._night_start // 60) % 24
+            nm = self._night_start % 60
+            painter.drawText(xn + 3, 2, 80, self.HEADER_H - 4,
+                             Qt.AlignVCenter | Qt.AlignLeft,
+                             f"Night {nh:02d}:{nm:02d}")
+
+        # Bottom border
+        painter.setPen(QPen(QColor("#cccccc"), 1))
+        painter.drawLine(0, chart_bot, self.width(), chart_bot)
+
+
+class TruckAvailDialog(QDialog):
+    """Dialog visualising which day-shift routes return to depot before the
+    night-shift start deadline.
+
+    Computes route end times from calc_times using the current Modified blocks
+    (falling back to original cached blocks if no modifications exist).
+    """
+
+    def __init__(self, cache, fname, dm, dm_dur, cfg, sheet_mods, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setWindowTitle("Truck Availability - Day Shift Return Times")
+        self.setMinimumSize(900, 460)
+        self.resize(1200, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        suppress = cfg.get("suppress_no_milking", True)
+
+        # Auto-detect night shift start
+        night_start_mins = None
+        for entry in cache.get(fname, {}).values():
+            if not isinstance(entry, dict):
+                continue
+            st = entry.get("start_time")
+            if st is None or _is_day_sheet(st):
+                continue
+            t = st.time() if isinstance(st, datetime) else st
+            m = t.hour * 60 + t.minute
+            if night_start_mins is None or m < night_start_mins:
+                night_start_mins = m
+
+        # Compute end times for every day route
+        routes = []
+        for sname, entry in cache.get(fname, {}).items():
+            if not isinstance(entry, dict):
+                continue
+            st = entry.get("start_time")
+            if st is None or not _is_day_sheet(st):
+                continue
+            blocks = sheet_mods.get((fname, sname), entry.get("blocks", []))
+            ct = calc_times(blocks, dm, st, dm_dur, suppress_no_milking=suppress)
+            if ct is None:
+                continue
+            _, end_cursor = ct
+            if end_cursor is None:
+                continue
+            t_st  = st.time()        if isinstance(st, datetime)         else st
+            t_end = end_cursor.time() if isinstance(end_cursor, datetime) else end_cursor
+            sm = t_st.hour  * 60 + t_st.minute
+            em = t_end.hour * 60 + t_end.minute
+            if em < sm:
+                em += 24 * 60   # past midnight
+            on_time = night_start_mins is None or em <= night_start_mins
+            routes.append({
+                "sname":      sname,
+                "colour":     entry.get("day_colour", ""),
+                "start_mins": sm,
+                "end_mins":   em,
+                "on_time":    on_time,
+            })
+
+        routes.sort(key=lambda r: r["start_mins"])
+        on_time_n = sum(1 for r in routes if r["on_time"])
+        total_n   = len(routes)
+
+        # Summary
+        if night_start_mins is not None:
+            nh, nm = night_start_mins // 60, night_start_mins % 60
+            summary = (f"{on_time_n} of {total_n} day routes return before "
+                       f"night shift start ({nh:02d}:{nm:02d}).  "
+                       f"{total_n - on_time_n} run over.")
+        else:
+            summary = (f"{total_n} day routes found.  "
+                       "No night routes detected - cannot determine deadline.")
+        lbl = QLabel(summary)
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+        # Legend
+        leg = QHBoxLayout()
+        for hex_c, text in [("#43a047", "Returns on time"),
+                             ("#e53935", "Runs over"),
+                             ("#1565c0", "Night shift start")]:
+            dot = QLabel()
+            dot.setFixedSize(14, 14)
+            dot.setStyleSheet(f"background:{hex_c}; border-radius:3px;")
+            leg.addWidget(dot)
+            leg.addWidget(QLabel(text))
+            leg.addSpacing(12)
+        leg.addStretch()
+        layout.addLayout(leg)
+
+        # Timeline
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(False)
+        timeline = TruckAvailWidget(routes, night_start_mins)
+        scroll.setWidget(timeline)
+        layout.addWidget(scroll)
+
+        # Close
+        row = QHBoxLayout()
+        row.addStretch()
+        btn = QPushButton("Close")
+        btn.clicked.connect(self.close)
+        row.addWidget(btn)
+        layout.addLayout(row)
+
+
+
     """Shows every truck's visit to every processor across the currently
     loaded file as a Gantt-style chart, built from whatever blocks are
     currently active (solver output if present, original parse otherwise).
@@ -6526,6 +6767,13 @@ class MainWindow(QMainWindow):
             "Penalty per truck short of the minimum return count.\n"
             "Set large enough to outweigh typical route-cost differences.")
         trk_l.addWidget(spin_row("Penalty / missing truck", self._sw_truck_avail_pen))
+
+        self._btn_truck_avail_viz = QPushButton("View Return Timeline...")
+        self._btn_truck_avail_viz.setToolTip(
+            "Open a Gantt chart showing when each day-shift route returns\n"
+            "to depot vs the night-shift start deadline.")
+        self._btn_truck_avail_viz.clicked.connect(self._on_truck_avail_visualize)
+        trk_l.addWidget(self._btn_truck_avail_viz)
 
         trk_l.addStretch()
         top_l.addWidget(trk_box)
@@ -9638,6 +9886,19 @@ class MainWindow(QMainWindow):
             self.shift_type_box.setStyleSheet(
                 "background-color: #3949ab; color: white; font-weight: bold; "
                 "border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
+
+    def _on_truck_avail_visualize(self):
+        """Open the TruckAvailDialog showing day-route return times."""
+        fname = self.file_cb.currentText()
+        if not fname or fname not in self._cache:
+            QMessageBox.information(self, "No file", "Load a file first.")
+            return
+        cfg = {"suppress_no_milking": (self._suppress_no_milking_cb.isChecked()
+                                        if hasattr(self, "_suppress_no_milking_cb") else True)}
+        dlg = TruckAvailDialog(
+            self._cache, fname, self.dm, self.dm_dur, cfg,
+            self._sheet_mods, parent=self)
+        dlg.exec_()
 
     def _refresh_truck_avail_label(self, cfg=None):
         """Update the night-start display in the Truck Availability solver panel."""
