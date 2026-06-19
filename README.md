@@ -1,7 +1,9 @@
 
-current ver: viewer204
+current ver: viewer205
 
 ver history
+
+205: added visualizer
 
 204: solver fixes
 
