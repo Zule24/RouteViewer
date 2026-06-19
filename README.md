@@ -1,7 +1,9 @@
 
-current ver: viewer206
+current ver: viewer207
 
 ver history
+
+207: visualizer fixes
 
 206: visualizer fixes
 
