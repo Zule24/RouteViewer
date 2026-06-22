@@ -15,6 +15,7 @@ name: Build Windows exe
 on:
   push:
     branches: [main]
+    paths:    ['viewer160.py']   # only rebuild when the source changes
     tags:     ['v*']
   workflow_dispatch:   # adds a "Run workflow" button in the Actions tab
 
