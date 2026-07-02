@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QCheckBox, QTextEdit, QSizePolicy, QDialog,
     QLineEdit, QMessageBox, QFileDialog, QToolTip, QButtonGroup,
     QGraphicsScene, QGraphicsView, QGraphicsEllipseItem,
-    QGraphicsRectItem, QGraphicsPixmapItem, QDialogButtonBox
+    QGraphicsRectItem, QGraphicsPixmapItem, QGraphicsTextItem, QDialogButtonBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray, QObject, QRectF, QPointF
 from PyQt5.QtGui import (QFont, QColor, QDrag, QPainter, QPen, QBrush,
@@ -6381,6 +6381,12 @@ class MapDialog(QDialog):
         # Build base scene + load tiles
         self._build_base()
         self._load_tiles()
+        # _show_block(0) deferred to showEvent so the view is properly sized first
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        # Re-fit to Lower Mainland then draw block 0 now that the view has a real size
+        self._fit_to_bounds()
         self._show_block(0)
 
     def _wheel(self, ev):
@@ -6393,6 +6399,13 @@ class MapDialog(QDialog):
         super().closeEvent(ev)
 
     # ── Scene base (all dots) ─────────────────────────────────────────────────
+
+    def _fit_to_bounds(self):
+        """Fit the view to the Lower Mainland tile area."""
+        x0, y0 = self._to_scene(49.38, -123.30)
+        x1, y1 = self._to_scene(49.00, -121.40)
+        self._view.fitInView(QRectF(x0, y0, x1 - x0, y1 - y0),
+                             Qt.KeepAspectRatio)
 
     def _build_base(self):
         self._scene.clear()
@@ -6419,12 +6432,6 @@ class MapDialog(QDialog):
             dot.setZValue(2)
             dot.setToolTip(irma)
             self._scene.addItem(dot)
-
-        self._view.fitInView(
-            QRectF(*self._to_scene(49.38, -123.30),
-                   self._to_scene(49.00, -121.40)[0] - self._to_scene(49.38, -123.30)[0],
-                   self._to_scene(49.00, -121.40)[1] - self._to_scene(49.38, -123.30)[1]),
-            Qt.KeepAspectRatio)
 
     # ── OSM tile loading ──────────────────────────────────────────────────────
 
@@ -6525,14 +6532,17 @@ class MapDialog(QDialog):
                 else:     path.lineTo(x, y)
 
             shp = QPen(QColor(0, 0, 0, 100), 3); shp.setCosmetic(True)
-            self._route_items.append(self._scene.addPath(path, shp))
+            shadow = self._scene.addPath(path, shp)
+            shadow.setZValue(3)
+            self._route_items.append(shadow)
 
-            lp = QPen(colour, 2); lp.setCosmetic(True)
+            lp = QPen(colour, 2.5); lp.setCosmetic(True)
             lp.setCapStyle(Qt.RoundCap); lp.setJoinStyle(Qt.RoundJoin)
-            self._route_items.append(self._scene.addPath(path, lp))
+            line = self._scene.addPath(path, lp)
+            line.setZValue(4)
+            self._route_items.append(line)
 
         # Highlight stop dots + tooltips
-        font = QFont("Calibri", 7); font.setBold(True)
         for seq, stop in enumerate(stops):
             key = stop["key"]
             if not key or key not in self._irma_locs:
@@ -6560,7 +6570,7 @@ class MapDialog(QDialog):
             tip = f"{tip_prefix}: {key}" + (f"\n{name}" if name else "")
 
             dot = QGraphicsEllipseItem(-r, -r, r*2, r*2)
-            dot.setPen(QPen(QColor("#222"), 1))
+            dot.setPen(QPen(QColor("#222"), 1.5))
             dot.setBrush(QBrush(fill))
             dot.setFlag(dot.ItemIgnoresTransformations, True)
             dot.setPos(x, y)
@@ -6569,14 +6579,24 @@ class MapDialog(QDialog):
             self._scene.addItem(dot)
             self._route_items.append(dot)
 
-            # Sequence number label
-            num  = self._scene.addText(str(seq), font)
+            # Number label affixed to dot (child item — moves with it)
+            font = QFont("Calibri", 7); font.setBold(True)
+            num = QGraphicsTextItem(str(seq), dot)   # parent = dot
+            num.setFont(font)
             num.setDefaultTextColor(QColor("#ffffff"))
-            num.setFlag(num.ItemIgnoresTransformations, True)
-            num.setPos(x + r + 1, y - num.boundingRect().height() / 2)
             num.setZValue(7)
             num.setToolTip(tip)
-            self._route_items.append(num)
+            br = num.boundingRect()
+            # Dark pill background behind the number
+            bg = QGraphicsRectItem(
+                r + 1, -br.height() / 2,
+                br.width() + 2, br.height(),
+                dot)
+            bg.setBrush(QBrush(QColor(0, 0, 0, 200)))
+            bg.setPen(QPen(Qt.NoPen))
+            bg.setZValue(6)
+            num.setPos(r + 2, -br.height() / 2)
+            # num and bg are children of dot — removed automatically when dot is removed
 
         if not self._db_ok:
             self._status_lbl.setText("⚠ routes.db not found — place it beside the exe")
@@ -6828,6 +6848,9 @@ class MainWindow(QMainWindow):
 
         # Tabs
         self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(
+            "QTabBar::tab:last { border-right: 1px solid #aaaaaa; }"
+        )
         root.addWidget(self.tabs, stretch=1)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
