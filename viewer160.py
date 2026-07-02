@@ -6848,9 +6848,6 @@ class MainWindow(QMainWindow):
 
         # Tabs
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet(
-            "QTabBar::tab:last { border-right: 1px solid #aaaaaa; }"
-        )
         root.addWidget(self.tabs, stretch=1)
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
