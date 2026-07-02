@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QMessageBox, QFileDialog, QToolTip, QButtonGroup
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray
-from PyQt5.QtGui import QFont, QColor, QDrag, QPainter, QPen
+from PyQt5.QtGui import QFont, QColor, QDrag, QPainter, QPen, QBrush
 
 import openpyxl
 from openpyxl.styles import Font, Border, Side
@@ -461,6 +461,40 @@ def _build_block_stops(block, origin, is_last):
         s["_si"] = i
 
     return stops
+
+
+def _route_stop_segments(blocks, all_times, start_mins):
+    """Extract per-stop timing segments from calc_times output.
+
+    Returns list of (kind, arr_m, dep_m) where kind is 'farm' or 'processor',
+    arr_m / dep_m are absolute minutes since midnight (with past-midnight
+    correction so values are monotonically increasing).
+    """
+    segments = []
+    prev_dep = start_mins
+    for b_idx, (block, b_times) in enumerate(zip(blocks, all_times)):
+        is_last = (b_idx == len(blocks) - 1)
+        origin  = ("VEDDER" if b_idx == 0
+                   else (_block_last_dest_key(blocks[b_idx - 1]) or "VEDDER"))
+        stops   = _build_block_stops(block, origin, is_last)
+        for stop, timing in zip(stops, b_times):
+            if stop["type"] in ("origin", "vedder"):
+                continue
+            arr_t = timing.get("arr")
+            dep_t = timing.get("dep")
+            if arr_t is None or dep_t is None:
+                continue
+            arr_m = arr_t.hour * 60 + arr_t.minute
+            dep_m = dep_t.hour * 60 + dep_t.minute
+            # Correct for midnight wrap
+            while arr_m < prev_dep - 5:
+                arr_m += 24 * 60
+            while dep_m < arr_m:
+                dep_m += 24 * 60
+            prev_dep = dep_m
+            kind = "farm" if stop["type"] == "farm" else "processor"
+            segments.append((kind, arr_m, dep_m))
+    return segments
 
 
 def _is_holdover_block(block):
@@ -1301,6 +1335,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
                 f_i      = farms_by_id.get(id(row_data), 0)
                 bg       = CLR_ALT if farm_alt_idx % 2 == 0 else CLR_WHITE
                 farm_alt_idx += 1
+                is_robot = str(row_data.get("m1_start", "")).strip().upper() == "ROBOT"
                 milking_conflict = arrives_during_milking(arr_t, row_data, suppress_no_milking=suppress_no_milking)
                 for c_idx, (_, key) in enumerate(COLS):
                     if key == "dist":
@@ -1352,6 +1387,26 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
                         item = make_data_item(display_val, bg=bg, draggable=editable)
                     item.setData(Qt.UserRole, (b_idx, f_i))
                     table.setItem(r, c_idx, item)
+
+                # ROBOT farms: merge all 4 milking columns into one labelled cell
+                if is_robot:
+                    m1s_col = next(i for i, (_, k) in enumerate(COLS) if k == "m1_start")
+                    robot_item = make_data_item(
+                        "ROBOT", bg=QColor("#e8f5e9"),
+                        align=Qt.AlignCenter)
+                    rf = robot_item.font(); rf.setBold(True)
+                    robot_item.setFont(rf)
+                    robot_item.setForeground(QColor("#2e7d32"))
+                    robot_item.setData(Qt.UserRole, (b_idx, f_i))
+                    table.setItem(r, m1s_col, robot_item)
+                    # Clear the 3 hidden cells so Qt doesn't show stale data
+                    for span_key in ("m1_finish", "m2_start", "m2_finish"):
+                        sc = next(i for i, (_, k) in enumerate(COLS) if k == span_key)
+                        empty = QTableWidgetItem("")
+                        empty.setData(Qt.UserRole, (b_idx, f_i))
+                        table.setItem(r, sc, empty)
+                    table.setSpan(r, m1s_col, 1, 4)
+
                 r += 1
 
             elif stype == "dest":
@@ -1518,10 +1573,10 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         "edpu":      20,   # "E"   - just N/Y
         "location":  None, # Stretch - fills all remaining width
         "prior_vol": 58,
-        "dist":      44,
-        "arr_time":  42,
+        "dist":      58,
+        "arr_time":  46,
         "wait_time": 38,
-        "dep_time":  42,   # "Dep."
+        "dep_time":  56,   # "Dep."
         "_mwo":      20,   # "M"   - checkbox
     }
     for c_idx, (_, key) in enumerate(COLS):
@@ -3647,6 +3702,12 @@ class ALNSSolver(QThread):
             start_map[sname] = entry.get("start_time") if isinstance(entry, dict) else None
 
         # Only sheets with a real start time are eligible for insertion.
+        # When day_night_lock is on, also build a per-sheet day/night tag so
+        # the repair can restrict each farm to its origin shift class.
+        lock = self.cfg.get("day_night_lock", False)
+        day_map = {sname: _is_day_sheet(st)
+                   for sname, st in start_map.items()} if lock else {}
+
         eligible = [(s_idx, sname, blocks)
                     for s_idx, (sname, blocks) in enumerate(state)
                     if start_map.get(sname) is not None]
@@ -3675,7 +3736,15 @@ class ALNSSolver(QThread):
         cross_route = 0
         for s_hint, b_hint, farm in ordered:
             best_s, best_b, best_pos, best_c = None, None, None, float("inf")
-            for s_idx, sname, blocks in eligible:
+            # When locked, only consider sheets in the same day/night class
+            # as the farm's origin sheet.
+            if lock and s_hint < len(state):
+                origin_is_day = day_map.get(state[s_hint][0], True)
+                candidates = [(si, sn, bl) for si, sn, bl in eligible
+                              if day_map.get(sn, True) == origin_is_day]
+            else:
+                candidates = eligible
+            for s_idx, sname, blocks in candidates:
                 b_idx, pos, c = self._best_insert_cost(blocks, farm, self.dm,
                                                         shift_start=start_map[sname],
                                                         baseline=baseline_cache[sname],
@@ -3708,6 +3777,10 @@ class ALNSSolver(QThread):
             start_map[sname] = entry.get("start_time") if isinstance(entry, dict) else None
 
         # Only sheets with a real start time are eligible for insertion.
+        lock = self.cfg.get("day_night_lock", False)
+        day_map = {sname: _is_day_sheet(start_map[sname])
+                   for sname in start_map if start_map[sname] is not None} if lock else {}
+
         eligible_idxs = {s_idx for s_idx, (sname, _) in enumerate(state)
                          if start_map.get(sname) is not None}
 
@@ -3724,10 +3797,17 @@ class ALNSSolver(QThread):
             best_regret = -float("inf")
             best_slot   = None
             for i, (s_hint, b_hint, farm) in enumerate(pending):
+                # When locked, restrict target sheets to same day/night class
+                if lock and s_hint < len(state):
+                    origin_is_day = day_map.get(state[s_hint][0], True)
+                    allowed = {si for si in eligible_idxs
+                               if day_map.get(state[si][0], True) == origin_is_day}
+                else:
+                    allowed = eligible_idxs
                 slot_costs = []
                 for s_idx, (sname, blocks) in enumerate(state):
-                    if s_idx not in eligible_idxs:
-                        continue   # sheet has no start time - frozen
+                    if s_idx not in allowed:
+                        continue   # sheet has no start time or wrong shift class - frozen
                     b_idx, pos, c = self._best_insert_cost(blocks, farm, self.dm,
                                                             shift_start=start_map[sname],
                                                             baseline=baseline_cache[sname],
@@ -4606,6 +4686,10 @@ class ALNSSolver(QThread):
             if self._stop:
                 break
 
+            # Yield the GIL periodically so the UI thread stays responsive
+            if it % 50 == 0:
+                import time as _t; _t.sleep(0)
+
             # Decay all scores each segment - just multiply, no hard floor
             # on raw scores since the probability floor handles balance.
             if it % seg_size == 0 and it > 0:
@@ -5054,34 +5138,27 @@ class ALNSSolver(QThread):
 # -- IRMA Lookup Dialog --------------------------------------------------------
 
 class IRMALookupDialog(QDialog):
-    """Cross-file, cross-sheet IRMA farm lookup.
+    """Cross-file, cross-sheet IRMA farm and processor lookup.
 
-    Given a full or partial IRMA number, searches every loaded file and sheet
-    (both original parsed data and solver-modified routes) and lists every
-    block that contains a matching farm.  Double-clicking a result navigates
+    Given a full or partial IRMA number or processor key, searches every loaded
+    file and sheet (both original parsed data and solver-modified routes) and
+    lists every block that contains a match.  Double-clicking a result navigates
     the main window to that file/sheet.
 
     Results table columns:
-        File | Sheet | Route | Block # | Farm position | IRMA | Source
+        File | Sheet | Route | Block # | Type | IRMA / Key | Source
     where Source is 'Original', 'Modified', or 'Both'.
     """
 
-    # Emitted when the user double-clicks a result row so MainWindow can
-    # navigate without the dialog needing a direct reference to it.
-    # Payload: (fname, sname)
     navigate_requested = pyqtSignal(str, str)
 
     def __init__(self, cache, sheet_mods, parent=None):
-        """
-        cache       : MainWindow._cache  - {fname: {sname: {blocks, ...}}}
-        sheet_mods  : MainWindow._sheet_mods - {(fname,sname): mod_blocks}
-        """
         super().__init__(parent)
-        self.setWindowTitle("IRMA Farm Lookup")
-        self.setMinimumSize(820, 480)
+        self.setWindowTitle("IRMA / Processor Lookup")
+        self.setMinimumSize(880, 480)
         self._cache      = cache
         self._sheet_mods = sheet_mods
-        self._results    = []   # list of result dicts, parallel to table rows
+        self._results    = []
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -5089,11 +5166,11 @@ class IRMALookupDialog(QDialog):
 
         # -- Search bar -------------------------------------------------------
         bar = QHBoxLayout()
-        bar.addWidget(QLabel("IRMA number:"))
+        bar.addWidget(QLabel("IRMA / Processor:"))
         self._query = QLineEdit()
         self._query.setPlaceholderText(
-            "Full (71-117) or partial (71)  -  Enter to search")
-        self._query.setMinimumWidth(200)
+            "Farm IRMA (71-117) or processor key (905011) - partial match OK")
+        self._query.setMinimumWidth(220)
         bar.addWidget(self._query, stretch=1)
 
         self._search_btn = QPushButton("Search")
@@ -5113,12 +5190,11 @@ class IRMALookupDialog(QDialog):
         layout.addLayout(bar)
 
         # -- Status label ----------------------------------------------------
-        self._status = QLabel("Enter an IRMA number and press Search or Enter.")
+        self._status = QLabel("Enter an IRMA or processor key and press Search or Enter.")
         layout.addWidget(self._status)
 
         # -- Results table ----------------------------------------------------
-        RESULT_COLS = ["File", "Sheet", "Route", "Block #",
-                       "Position in block", "IRMA", "Source"]
+        RESULT_COLS = ["File", "Sheet", "Route", "Block #", "Type", "IRMA / Key", "Source"]
         self._table = QTableWidget(0, len(RESULT_COLS))
         self._table.setHorizontalHeaderLabels(RESULT_COLS)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -5153,7 +5229,7 @@ class IRMALookupDialog(QDialog):
         self._results = []
 
         if not query:
-            self._status.setText("Enter an IRMA number and press Search or Enter.")
+            self._status.setText("Enter an IRMA or processor key and press Search or Enter.")
             return
 
         search_orig = self._chk_orig.isChecked()
@@ -5163,7 +5239,7 @@ class IRMALookupDialog(QDialog):
             self._status.setText("Select at least one of Original / Modified.")
             return
 
-        hits = []   # list of dicts
+        hits = []
 
         for fname, sheets in self._cache.items():
             for sname, entry in sheets.items():
@@ -5173,33 +5249,47 @@ class IRMALookupDialog(QDialog):
                 orig_blocks = entry.get("blocks", [])
                 mod_blocks  = self._sheet_mods.get((fname, sname))
 
-                # Collect matching farms from each source independently so we
-                # can report whether a farm appears in Original, Modified, or both.
                 def _scan(blocks, source_label):
                     found = []
                     for b_idx, block in enumerate(blocks):
                         route = block.get("route", "") or ""
+
+                        # -- Farm rows --
                         for f_idx, row in enumerate(block.get("rows", [])):
                             irma = (row.get("irma") or "").strip().upper()
                             if query in irma:
                                 found.append({
-                                    "fname":   fname,
-                                    "sname":   sname,
-                                    "route":   route,
-                                    "b_idx":   b_idx,
-                                    "f_idx":   f_idx,
-                                    "irma":    row.get("irma", "").strip(),
-                                    "source":  source_label,
+                                    "fname":  fname,
+                                    "sname":  sname,
+                                    "route":  route,
+                                    "b_idx":  b_idx,
+                                    "f_idx":  f_idx,
+                                    "key":    row.get("irma", "").strip(),
+                                    "kind":   "Farm",
+                                    "source": source_label,
+                                })
+
+                        # -- Processor destinations --
+                        for d_idx, dest in enumerate(block.get("dests", [])):
+                            proc_key = (dest.get("key") or "").strip().upper()
+                            if query in proc_key:
+                                found.append({
+                                    "fname":  fname,
+                                    "sname":  sname,
+                                    "route":  route,
+                                    "b_idx":  b_idx,
+                                    "f_idx":  -(d_idx + 1),   # negative = dest slot
+                                    "key":    dest.get("key", "").strip(),
+                                    "kind":   "Processor",
+                                    "source": source_label,
                                 })
                     return found
 
                 orig_hits = _scan(orig_blocks, "Original") if search_orig else []
                 mod_hits  = _scan(mod_blocks,  "Modified") if (search_mod and mod_blocks) else []
 
-                # Merge: if the same (block, position, irma) appears in both,
-                # collapse into a single "Both" row rather than duplicating.
                 def _key(h):
-                    return (h["b_idx"], h["f_idx"], h["irma"])
+                    return (h["b_idx"], h["f_idx"], h["key"], h["kind"])
 
                 orig_keys = {_key(h): h for h in orig_hits}
                 mod_keys  = {_key(h): h for h in mod_hits}
@@ -5214,12 +5304,11 @@ class IRMALookupDialog(QDialog):
                     if k not in orig_keys:
                         hits.append(h)
 
-        # Sort: file -> sheet -> block -> position
         hits.sort(key=lambda h: (h["fname"], h["sname"], h["b_idx"], h["f_idx"]))
 
         if not hits:
             self._status.setText(
-                f"No routes found containing IRMA matching '{query}'.")
+                f"No results found matching '{query}'.")
             return
 
         self._status.setText(
@@ -5227,29 +5316,38 @@ class IRMALookupDialog(QDialog):
             f"for '{query}' - double-click a row to navigate.")
 
         SOURCE_COLOURS = {
-            "Original": QColor("#e8f5e9"),   # light green
-            "Modified": QColor("#e3f2fd"),   # light blue
-            "Both":     QColor("#fff8e1"),   # light amber
+            "Original": QColor("#e8f5e9"),
+            "Modified": QColor("#e3f2fd"),
+            "Both":     QColor("#fff8e1"),
+        }
+        KIND_COLOURS = {
+            "Processor": QColor("#fce4ec"),   # light red tint
+            "Farm":      None,                # use source colour
         }
 
         self._table.setRowCount(len(hits))
         self._results = hits
 
         for row_idx, h in enumerate(hits):
-            bg = SOURCE_COLOURS.get(h["source"], QColor("#ffffff"))
+            src_bg  = SOURCE_COLOURS.get(h["source"], QColor("#ffffff"))
+            kind_bg = KIND_COLOURS.get(h["kind"])
+            bg      = kind_bg if kind_bg else src_bg
+
+            pos_label = (f"Dest {-h['f_idx']}" if h["f_idx"] < 0
+                         else f"Farm {h['f_idx'] + 1}")
             values = [
                 h["fname"],
                 h["sname"],
                 h["route"] or "-",
                 str(h["b_idx"] + 1),
-                f"Farm {h['f_idx'] + 1}",
-                h["irma"],
+                h["kind"],
+                h["key"],
                 h["source"],
             ]
             for col_idx, val in enumerate(values):
                 item = QTableWidgetItem(val)
                 item.setBackground(bg)
-                if col_idx == 5:   # IRMA column - bold
+                if col_idx == 5:   # key column - bold
                     f = item.font(); f.setBold(True); item.setFont(f)
                 self._table.setItem(row_idx, col_idx, item)
 
@@ -5625,35 +5723,55 @@ def _hhmm_minutes(s):
 
 
 class TruckAvailWidget(QWidget):
-    """Gantt-style timeline: one row per day-shift route, bar from start to
-    depot-return.  A vertical dashed line marks the night-shift start deadline.
-    Green bars finish before the line; red bars run over.
+    """Gantt-style timeline.
+
+    Day section:   one row per day route — bar from start to depot-return.
+    Night section: one row per night route — start-time marker only.
+    A vertical dashed line marks the earliest night-shift start.
     """
     PX_PER_MIN = 4
     ROW_H      = 30
     LABEL_W    = 70
     HEADER_H   = 28
     PAD        = 4
+    SEP_H      = 6    # gap between day and night sections
+    SECT_HDR_H = 20   # section header label height
 
-    def __init__(self, routes, night_start_mins, parent=None):
+    def __init__(self, day_routes, night_routes, night_start_mins, parent=None):
         super().__init__(parent)
-        self._routes      = routes           # list of dicts (see TruckAvailDialog)
+        self._day    = day_routes
+        self._night  = night_routes
         self._night_start = night_start_mins
 
-        if routes:
-            t_min = (min(r["start_mins"] for r in routes) // 60) * 60 - 15
-            t_end_max = (max(r["end_mins"] for r in routes) // 60 + 1) * 60 + 30
-            t_night   = ((night_start_mins // 60 + 1) * 60 + 30
-                         if night_start_mins is not None else 0)
-            t_max = max(t_end_max, t_night)
+        all_starts = ([r["start_mins"] for r in day_routes] +
+                      [r["start_mins"] for r in night_routes])
+        all_ends   = ([r["end_mins"] for r in day_routes] +
+                      [r["end_mins"] for r in night_routes if r.get("end_mins") is not None])
+
+        if all_starts:
+            t_min = (min(all_starts) // 60) * 60 - 15
         else:
-            t_min, t_max = 0, 24 * 60
+            t_min = 0
+
+        candidates = []
+        if all_ends:
+            candidates.append((max(all_ends) // 60 + 1) * 60 + 30)
+        if all_starts:
+            candidates.append((max(all_starts) // 60 + 1) * 60 + 30)
+        if night_start_mins is not None:
+            candidates.append((night_start_mins // 60 + 1) * 60 + 30)
+        t_max = max(candidates) if candidates else 24 * 60
+
         self._t_min = max(0, t_min)
         self._t_max = t_max
 
+        n_day   = len(day_routes)
+        n_night = len(night_routes)
+        night_block = (self.SEP_H + self.SECT_HDR_H + n_night * self.ROW_H
+                       if n_night else 0)
         w = self.LABEL_W + int((self._t_max - self._t_min) * self.PX_PER_MIN) + 20
-        h = self.HEADER_H + len(routes) * self.ROW_H + 10
-        self.setMinimumSize(w, h)
+        h = self.HEADER_H + n_day * self.ROW_H + night_block + 10
+        self.setMinimumSize(w, max(h, 60))
 
     def _x(self, minute):
         return self.LABEL_W + int((minute - self._t_min) * self.PX_PER_MIN)
@@ -5666,25 +5784,12 @@ class TruckAvailWidget(QWidget):
         font_axis  = QFont("Calibri", 8)
         font_label = QFont("Calibri", 9)
         font_bold  = QFont("Calibri", 9); font_bold.setBold(True)
+        font_sect  = QFont("Calibri", 8); font_sect.setBold(True)
 
-        chart_top  = self.HEADER_H
-        chart_bot  = chart_top + len(self._routes) * self.ROW_H
+        chart_top = self.HEADER_H
+        n_day     = len(self._day)
+        day_bot   = chart_top + n_day * self.ROW_H
 
-        # Hour gridlines + axis labels
-        painter.setFont(font_axis)
-        t = (self._t_min // 60) * 60
-        while t <= self._t_max:
-            x = self._x(t)
-            painter.setPen(QPen(QColor("#e0e0e0"), 1))
-            painter.drawLine(x, chart_top, x, chart_bot)
-            painter.setPen(QPen(QColor("#555555"), 1))
-            hh = (t // 60) % 24
-            mm = t % 60
-            painter.drawText(x + 2, 2, 52, self.HEADER_H - 4,
-                             Qt.AlignVCenter | Qt.AlignLeft, f"{hh:02d}:{mm:02d}")
-            t += 60
-
-        # Route rows
         CLR_GREEN  = QColor("#43a047")
         CLR_RED    = QColor("#e53935")
         CLR_GBORD  = QColor("#2e7d32")
@@ -5692,16 +5797,46 @@ class TruckAvailWidget(QWidget):
         CLR_RED_BG = QColor("#ffcdd2")
         CLR_BLU_BG = QColor("#bbdefb")
         CLR_OTH_BG = QColor("#e0e0e0")
+        CLR_NIGHT_BG  = QColor("#ede7f6")   # pale indigo for night rows
+        CLR_NIGHT_MRK = QColor("#5e35b1")   # indigo marker
 
-        for i, r in enumerate(self._routes):
-            row_top  = chart_top + i * self.ROW_H
-            on_time  = r["on_time"]
+        # ── Hour gridlines + axis labels ──────────────────────────────────
+        painter.setFont(font_axis)
+        total_bot = (day_bot + self.SEP_H + self.SECT_HDR_H +
+                     len(self._night) * self.ROW_H if self._night else day_bot)
+        t = (self._t_min // 60) * 60
+        while t <= self._t_max:
+            x = self._x(t)
+            painter.setPen(QPen(QColor("#e0e0e0"), 1))
+            painter.drawLine(x, chart_top, x, total_bot)
+            painter.setPen(QPen(QColor("#555555"), 1))
+            hh = (t // 60) % 24
+            mm = t % 60
+            painter.drawText(x + 2, 2, 52, self.HEADER_H - 4,
+                             Qt.AlignVCenter | Qt.AlignLeft, f"{hh:02d}:{mm:02d}")
+            t += 60
 
-            # Row background
+        # ── Night-shift start deadline line ───────────────────────────────
+        if self._night_start is not None:
+            xn = self._x(self._night_start)
+            painter.setPen(QPen(QColor("#1565c0"), 2, Qt.DashLine))
+            painter.drawLine(xn, 0, xn, total_bot)
+            painter.setFont(font_bold)
+            painter.setPen(QPen(QColor("#1565c0"), 1))
+            nh = (self._night_start // 60) % 24
+            nm = self._night_start % 60
+            painter.drawText(xn + 3, 2, 80, self.HEADER_H - 4,
+                             Qt.AlignVCenter | Qt.AlignLeft,
+                             f"Night {nh:02d}:{nm:02d}")
+
+        # ── Day route rows ────────────────────────────────────────────────
+        for i, r in enumerate(self._day):
+            row_top = chart_top + i * self.ROW_H
+            on_time = r["on_time"]
+
             bg = QColor("#f8f8f8") if i % 2 == 0 else QColor("#ffffff")
             painter.fillRect(0, row_top, self.width(), self.ROW_H, bg)
 
-            # Colour-coded name label
             lbl_bg = (CLR_RED_BG if r["colour"] == "RED" else
                       CLR_BLU_BG if r["colour"] == "BLUE" else CLR_OTH_BG)
             painter.fillRect(0, row_top, self.LABEL_W, self.ROW_H, lbl_bg)
@@ -5710,7 +5845,6 @@ class TruckAvailWidget(QWidget):
             painter.drawText(4, row_top, self.LABEL_W - 8, self.ROW_H,
                              Qt.AlignVCenter | Qt.AlignLeft, r["sname"])
 
-            # Shift bar
             x1 = self._x(r["start_mins"])
             x2 = self._x(r["end_mins"])
             bw = max(4, x2 - x1)
@@ -5721,7 +5855,15 @@ class TruckAvailWidget(QWidget):
             painter.setPen(QPen(CLR_GBORD if on_time else CLR_RBORD, 1))
             painter.drawRoundedRect(x1, by, bw, bh, 3, 3)
 
-            # Return time label inside bar
+            # Stop segments overlaid on bar: farm=teal, processor=orange
+            for kind, arr_m, dep_m in r.get("segments", []):
+                xs = self._x(arr_m)
+                xe = self._x(dep_m)
+                sw = max(2, xe - xs)
+                painter.fillRect(xs, by + 2, sw, bh - 4,
+                                 QColor("#00bfa5") if kind == "farm"
+                                 else QColor("#ff6d00"))
+
             if bw > 44:
                 end_hh = (r["end_mins"] // 60) % 24
                 end_mm = r["end_mins"] % 60
@@ -5731,92 +5873,184 @@ class TruckAvailWidget(QWidget):
                                  Qt.AlignVCenter | Qt.AlignRight,
                                  f"{end_hh:02d}:{end_mm:02d}")
 
-            # Row separator
             painter.setPen(QPen(QColor("#cccccc"), 1))
             painter.drawLine(0, row_top, self.width(), row_top)
 
-        # Night-shift start line
-        if self._night_start is not None:
-            xn = self._x(self._night_start)
-            pen = QPen(QColor("#1565c0"), 2, Qt.DashLine)
-            painter.setPen(pen)
-            painter.drawLine(xn, 0, xn, chart_bot)
-            painter.setFont(font_bold)
-            painter.setPen(QPen(QColor("#1565c0"), 1))
-            nh = (self._night_start // 60) % 24
-            nm = self._night_start % 60
-            painter.drawText(xn + 3, 2, 80, self.HEADER_H - 4,
-                             Qt.AlignVCenter | Qt.AlignLeft,
-                             f"Night {nh:02d}:{nm:02d}")
+        # Bottom of day section
+        painter.setPen(QPen(QColor("#999999"), 1))
+        painter.drawLine(0, day_bot, self.width(), day_bot)
 
-        # Bottom border
-        painter.setPen(QPen(QColor("#cccccc"), 1))
-        painter.drawLine(0, chart_bot, self.width(), chart_bot)
+        # ── Night section ─────────────────────────────────────────────────
+        if self._night:
+            sect_top = day_bot + self.SEP_H
+            # Section header
+            painter.fillRect(0, sect_top, self.width(), self.SECT_HDR_H,
+                             QColor("#f0f0f0"))
+            painter.setFont(font_sect)
+            painter.setPen(QPen(QColor("#444444"), 1))
+            painter.drawText(4, sect_top, self.width() - 8, self.SECT_HDR_H,
+                             Qt.AlignVCenter | Qt.AlignLeft, "Night shift starts")
+
+            night_top = sect_top + self.SECT_HDR_H
+            for i, r in enumerate(self._night):
+                row_top = night_top + i * self.ROW_H
+
+                painter.fillRect(0, row_top, self.width(), self.ROW_H,
+                                 CLR_NIGHT_BG)
+
+                # Label
+                lbl_bg = (CLR_RED_BG if r["colour"] == "RED" else
+                          CLR_BLU_BG if r["colour"] == "BLUE" else CLR_OTH_BG)
+                painter.fillRect(0, row_top, self.LABEL_W, self.ROW_H, lbl_bg)
+                painter.setFont(font_bold)
+                painter.setPen(QPen(QColor("#222222"), 1))
+                painter.drawText(4, row_top, self.LABEL_W - 8, self.ROW_H,
+                                 Qt.AlignVCenter | Qt.AlignLeft, r["sname"])
+
+                x1 = self._x(r["start_mins"])
+                by = row_top + self.PAD
+                bh = self.ROW_H - 2 * self.PAD
+
+                if r.get("end_mins") is not None:
+                    # Full bar from start to end
+                    x2 = self._x(r["end_mins"])
+                    bw = max(4, x2 - x1)
+                    painter.setBrush(QBrush(CLR_NIGHT_MRK))
+                    painter.setPen(QPen(QColor("#311b92"), 1))
+                    painter.drawRoundedRect(x1, by, bw, bh, 3, 3)
+                    # Stop segments
+                    for kind, arr_m, dep_m in r.get("segments", []):
+                        xs = self._x(arr_m)
+                        xe = self._x(dep_m)
+                        sw = max(2, xe - xs)
+                        painter.fillRect(xs, by + 2, sw, bh - 4,
+                                         QColor("#00bfa5") if kind == "farm"
+                                         else QColor("#ff6d00"))
+                    if bw > 44:
+                        end_hh = (r["end_mins"] // 60) % 24
+                        end_mm = r["end_mins"] % 60
+                        painter.setPen(QPen(QColor("#ffffff"), 1))
+                        painter.setFont(font_label)
+                        painter.drawText(x1 + 3, by, bw - 6, bh,
+                                         Qt.AlignVCenter | Qt.AlignRight,
+                                         f"{end_hh:02d}:{end_mm:02d}")
+                else:
+                    # Fallback: narrow marker if end time unavailable
+                    painter.setBrush(QBrush(CLR_NIGHT_MRK))
+                    painter.setPen(QPen(QColor("#311b92"), 1))
+                    painter.drawRoundedRect(x1 - 2, by, 5, bh, 2, 2)
+                    sh = (r["start_mins"] // 60) % 24
+                    sm = r["start_mins"] % 60
+                    painter.setFont(font_label)
+                    painter.setPen(QPen(QColor("#311b92"), 1))
+                    painter.drawText(x1 + 6, row_top, 60, self.ROW_H,
+                                     Qt.AlignVCenter | Qt.AlignLeft,
+                                     f"{sh:02d}:{sm:02d}")
+
+                painter.setPen(QPen(QColor("#cccccc"), 1))
+                painter.drawLine(0, row_top, self.width(), row_top)
 
 
 class TruckAvailDialog(QDialog):
-    """Dialog visualising which day-shift routes return to depot before the
-    night-shift start deadline.  Receives pre-computed route timing data
-    so the constructor does no heavy work.
+    """Dialog visualising day-route return times and night-route start times.
+    Includes a RED / BLUE / All filter.
     """
 
-    def __init__(self, routes, night_start_mins, parent=None):
-        """
-        routes: list of dicts {sname, colour, start_mins, end_mins, on_time}
-        night_start_mins: int (minutes since midnight) or None
-        """
+    def __init__(self, day_routes, night_routes, night_start_mins, parent=None):
         super().__init__(parent)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.setWindowTitle("Truck Availability - Day Shift Return Times")
-        self.setMinimumSize(900, 460)
-        self.resize(1200, 560)
+        self.setWindowTitle("Truck Availability - Return Times")
+        self.setMinimumSize(900, 500)
+        self.resize(1200, 620)
+
+        self._all_day     = day_routes
+        self._all_night   = night_routes
+        self._night_start = night_start_mins
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
-        on_time_n = sum(1 for r in routes if r["on_time"])
-        total_n   = len(routes)
-
-        if night_start_mins is not None:
-            nh, nm = night_start_mins // 60, night_start_mins % 60
-            summary = (f"{on_time_n} of {total_n} day routes return before "
-                       f"night shift start ({nh:02d}:{nm:02d}).  "
-                       f"{total_n - on_time_n} run over.")
-        else:
-            summary = (f"{total_n} day routes found.  "
-                       "No night routes detected - cannot determine deadline.")
-        lbl = QLabel(summary)
-        lbl.setWordWrap(True)
-        layout.addWidget(lbl)
+        # Filter buttons
+        top_row = QHBoxLayout()
+        top_row.addWidget(QLabel("Show:"))
+        self._filter_btns = {}
+        for label in ("All", "RED", "BLUE"):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFixedWidth(60)
+            btn.clicked.connect(lambda _, l=label: self._set_filter(l))
+            self._filter_btns[label] = btn
+            top_row.addWidget(btn)
+        top_row.addSpacing(20)
 
         # Legend
-        leg = QHBoxLayout()
-        for hex_c, text in [("#43a047", "Returns on time"),
-                             ("#e53935", "Runs over"),
-                             ("#1565c0", "Night shift start")]:
+        for hex_c, text in [("#43a047", "On time"), ("#e53935", "Late"),
+                             ("#1565c0", "Night deadline"), ("#5e35b1", "Night shift"),
+                             ("#00bfa5", "Farm stop"), ("#ff6d00", "Processor stop")]:
             dot = QLabel()
-            dot.setFixedSize(14, 14)
-            dot.setStyleSheet(f"background:{hex_c}; border-radius:3px;")
-            leg.addWidget(dot)
-            leg.addWidget(QLabel(text))
-            leg.addSpacing(12)
-        leg.addStretch()
-        layout.addLayout(leg)
+            dot.setFixedSize(12, 12)
+            dot.setStyleSheet(f"background:{hex_c}; border-radius:2px;")
+            top_row.addWidget(dot)
+            top_row.addWidget(QLabel(text))
+            top_row.addSpacing(8)
+        top_row.addStretch()
+        layout.addLayout(top_row)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(False)
-        timeline = TruckAvailWidget(routes, night_start_mins)
-        scroll.setWidget(timeline)
-        layout.addWidget(scroll)
+        self._summary_lbl = QLabel()
+        self._summary_lbl.setWordWrap(True)
+        layout.addWidget(self._summary_lbl)
 
-        row = QHBoxLayout()
-        row.addStretch()
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(False)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        layout.addWidget(self._scroll, stretch=1)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
         btn = QPushButton("Close")
         btn.clicked.connect(self.close)
-        row.addWidget(btn)
-        layout.addLayout(row)
+        close_row.addWidget(btn)
+        layout.addLayout(close_row)
 
+        self._set_filter("All")
+
+    def update_routes(self, day_routes, night_routes, night_start_mins):
+        """Refresh with new data (called when solver finishes)."""
+        self._all_day     = day_routes
+        self._all_night   = night_routes
+        self._night_start = night_start_mins
+        current = next((l for l, b in self._filter_btns.items()
+                        if b.isChecked()), "All")
+        self._set_filter(current)
+
+    def _set_filter(self, bucket):
+        for label, btn in self._filter_btns.items():
+            btn.setChecked(label == bucket)
+
+        if bucket == "All":
+            day   = self._all_day
+            night = self._all_night
+        else:
+            day   = [r for r in self._all_day   if r["colour"] == bucket]
+            night = [r for r in self._all_night if r["colour"] == bucket]
+
+        on_time = sum(1 for r in day if r["on_time"])
+        total   = len(day)
+        if self._night_start is not None:
+            nh, nm = self._night_start // 60, self._night_start % 60
+            self._summary_lbl.setText(
+                f"{on_time}/{total} day routes back before night deadline "
+                f"({nh:02d}:{nm:02d})  •  {total - on_time} run over  •  "
+                f"{len(night)} night routes shown")
+        else:
+            self._summary_lbl.setText(
+                f"{total} day routes  •  {len(night)} night routes  •  "
+                "No night deadline detected.")
+
+        widget = TruckAvailWidget(day, night, self._night_start)
+        self._scroll.setWidget(widget)
 
 
 class ProcessorScheduleDialog(QDialog):
@@ -6034,8 +6268,8 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8,8,8,8); root.setSpacing(8)
 
         # Left control panel
-        left = QFrame(); left.setFrameShape(QFrame.StyledPanel); left.setFixedWidth(220)
-        ll = QVBoxLayout(left); ll.setContentsMargins(10,10,10,10); ll.setSpacing(5)
+        left = QFrame(); left.setFrameShape(QFrame.StyledPanel); left.setFixedWidth(170)
+        ll = QVBoxLayout(left); ll.setContentsMargins(6,8,6,8); ll.setSpacing(4)
         bold = QFont(); bold.setBold(True)
         def lbl(t): l=QLabel(t); l.setFont(bold); return l
 
@@ -6119,6 +6353,7 @@ class MainWindow(QMainWindow):
             row_l.setContentsMargins(0,0,0,0); row_l.setSpacing(4)
             lbl_w = QLabel(label); lbl_w.setFont(lbl_font)
             lbl_w.setStyleSheet("color:#555555;")
+            lbl_w.setWordWrap(True)
             val_w = QLabel(value);  val_w.setFont(val_font)
             val_w.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
             val_w.setStyleSheet("color:#222222;")
@@ -6167,7 +6402,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.reset_btn)
         ll.addSpacing(4)
 
-        self.irma_lookup_btn = QPushButton("IRMA Farm Lookup...")
+        self.irma_lookup_btn = QPushButton("Lookup...")
         self.irma_lookup_btn.setFixedHeight(28)
         self.irma_lookup_btn.setStyleSheet(
             "QPushButton { background:#6a1b9a; color:white; font-weight:bold; "
@@ -6681,6 +6916,15 @@ class MainWindow(QMainWindow):
             "Higher values push the solver to favour shorter days overall.\n"
             "Default 5.0 = roughly equivalent to 6 km per hour of shift time.")
         con_l.addWidget(spin_row("Shift hours weight", self._sw_shift_hours, "/h"))
+
+        self._sw_day_night_lock = QCheckBox("Lock farms to current day / night shift")
+        self._sw_day_night_lock.setToolTip(
+            "When enabled, the solver will not move a farm between a day route\n"
+            "(start before noon) and a night route (start at noon or later).\n"
+            "Preserves pickup timing consistency so prior-volume estimates\n"
+            "remain reliable.  Routes starting before noon = Day; noon+ = Night.")
+        con_l.addWidget(self._sw_day_night_lock)
+
         con_l.addStretch()
         top_l.addWidget(con_box)
 
@@ -6912,11 +7156,19 @@ class MainWindow(QMainWindow):
 
         lock_btn_row = QWidget(); lbr_l = QHBoxLayout(lock_btn_row)
         lbr_l.setContentsMargins(0,0,0,0); lbr_l.setSpacing(4)
-        sel_all_btn = QPushButton("Select All"); sel_all_btn.setFixedHeight(20)
+        sel_all_btn  = QPushButton("Select All");      sel_all_btn.setFixedHeight(20)
         sel_all_btn.setStyleSheet("font-size:8pt;")
-        clr_all_btn = QPushButton("Clear All");  clr_all_btn.setFixedHeight(20)
+        clr_all_btn  = QPushButton("Clear All");       clr_all_btn.setFixedHeight(20)
         clr_all_btn.setStyleSheet("font-size:8pt;")
-        lbr_l.addWidget(sel_all_btn); lbr_l.addWidget(clr_all_btn); lbr_l.addStretch()
+        rst_def_btn  = QPushButton("Reset Defaults");  rst_def_btn.setFixedHeight(20)
+        rst_def_btn.setStyleSheet("font-size:8pt;")
+        rst_def_btn.setToolTip(
+            "Re-lock all default sheets (SOLVER_SKIP_SHEETS) and unlock any\n"
+            "manually locked sheets, restoring the out-of-box state.")
+        lbr_l.addWidget(sel_all_btn)
+        lbr_l.addWidget(clr_all_btn)
+        lbr_l.addWidget(rst_def_btn)
+        lbr_l.addStretch()
         lock_l.addWidget(lock_btn_row)
 
         lock_scroll = QScrollArea()
@@ -6934,8 +7186,12 @@ class MainWindow(QMainWindow):
             for cb in self._locked_sheet_cbs.values(): cb.setChecked(True)
         def _clr_all():
             for cb in self._locked_sheet_cbs.values(): cb.setChecked(False)
+        def _rst_def():
+            for sname, cb in self._locked_sheet_cbs.items():
+                cb.setChecked(sname.strip() in SOLVER_SKIP_SHEETS)
         sel_all_btn.clicked.connect(_sel_all)
         clr_all_btn.clicked.connect(_clr_all)
+        rst_def_btn.clicked.connect(_rst_def)
 
         bottom_split.addWidget(lock_box)
 
@@ -8293,11 +8549,10 @@ class MainWindow(QMainWindow):
             if bg:
                 cb.setStyleSheet(
                     f"QCheckBox {{ color: {bg.name()}; font-weight: bold; }}")
-            # Pre-tick sheets that are in SOLVER_SKIP_SHEETS (always locked)
+            # Pre-tick sheets that are in SOLVER_SKIP_SHEETS (locked by default)
             if sname.strip() in SOLVER_SKIP_SHEETS:
                 cb.setChecked(True)
-                cb.setEnabled(False)
-                cb.setToolTip("Always locked (SOLVER_SKIP_SHEETS).")
+                cb.setToolTip("Locked by default - uncheck to allow solver to modify.")
             self._lock_layout.addWidget(cb)
             self._locked_sheet_cbs[sname] = cb
 
@@ -8314,9 +8569,13 @@ class MainWindow(QMainWindow):
             "Excel Files (*.xlsx)")
         if not out_path: return
         try:
+            self.statusBar().showMessage(f"Exporting {fname}  ...")
+            QApplication.processEvents()
             self._export_xlsx(fpath, out_path, fname)
+            self.statusBar().showMessage(f"Export complete  ->  {out_path}", 6000)
             QMessageBox.information(self, "Export", "Saved to:\n" + out_path)
         except Exception as e:
+            self.statusBar().showMessage(f"Export failed: {e}", 6000)
             QMessageBox.critical(self, "Export Error", str(e))
 
     def _export_xlsx(self, src_path, dst_path, fname):
@@ -8347,7 +8606,11 @@ class MainWindow(QMainWindow):
         # data_only=False: export never reads cached values, only writes -
         # skipping data_only avoids computing the formula-value cache openpyxl
         # builds when data_only=True, which is pure overhead here.
+        self.statusBar().showMessage(f"Exporting {fname}  -  loading workbook ...")
+        QApplication.processEvents()
         wb = openpyxl.load_workbook(src_path, read_only=False, data_only=False)
+        self.statusBar().showMessage(f"Exporting {fname}  -  writing changes ...")
+        QApplication.processEvents()
         if getattr(self, "_debug_text", None) is not None:
             self._debug_text.append(
                 f"[{fname}] Workbook opened in {_time.time()-_t0:.1f}s, writing changes...")
@@ -9122,6 +9385,8 @@ class MainWindow(QMainWindow):
                 ws.merge_cells(start_row=row, start_column=C_M1_START,
                                end_row=row,   end_column=C_M2_FINISH + 2)
 
+        self.statusBar().showMessage(f"Exporting {fname}  -  saving file ...")
+        QApplication.processEvents()
         wb.save(dst_path)
 
         # Surface any per-block slot warnings
@@ -9233,6 +9498,7 @@ class MainWindow(QMainWindow):
             "truck_avail_enabled":  self._sw_truck_avail_chk.isChecked(),
             "truck_avail_min_back": self._sw_truck_avail_min_back.value(),
             "truck_avail_penalty":  self._sw_truck_avail_pen.value(),
+            "day_night_lock":       self._sw_day_night_lock.isChecked(),
         }
 
         # Refresh night-start label before solver runs
@@ -9362,6 +9628,16 @@ class MainWindow(QMainWindow):
         # Re-optimize split positions after solve
         if hasattr(self, "_chk_split_opt") and self._chk_split_opt.isChecked():
             self._optimize_all_split_positions(fname)
+
+        # Refresh truck availability timeline if it is open
+        dlg = getattr(self, "_truck_avail_dlg", None)
+        if dlg and dlg.isVisible():
+            try:
+                day_routes, night_routes, night_start_mins = \
+                    self._compute_truck_avail_routes(fname)
+                dlg.update_routes(day_routes, night_routes, night_start_mins)
+            except Exception:
+                pass
 
     def _init_route_table(self, t, editable=False):
         t.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -9745,13 +10021,36 @@ class MainWindow(QMainWindow):
             for sheet_name, msg in warnings:
                 lines.append(f"Sheet '{sheet_name}':\n  {msg}")
             body = "\n\n".join(lines)
-            QMessageBox.warning(
-                self,
-                f"Load warnings - {fname}",
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"Load warnings - {fname}")
+            dlg.setWindowFlags(dlg.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+            dlg.setMinimumWidth(520)
+            dlg.resize(560, 400)
+            lay = QVBoxLayout(dlg)
+            lay.setContentsMargins(12, 12, 12, 12)
+            lay.setSpacing(8)
+
+            intro = QLabel(
                 f"The following issues were found while loading {fname}.\n"
-                f"Affected sheets may appear empty or have missing data.\n\n"
-                f"{body}"
+                "Affected sheets may appear empty or have missing data."
             )
+            intro.setWordWrap(True)
+            lay.addWidget(intro)
+
+            from PyQt5.QtWidgets import QTextEdit
+            txt = QTextEdit()
+            txt.setReadOnly(True)
+            txt.setPlainText(body)
+            txt.setStyleSheet("font-family: monospace; font-size: 8pt;")
+            lay.addWidget(txt, stretch=1)
+
+            from PyQt5.QtWidgets import QDialogButtonBox
+            btns = QDialogButtonBox(QDialogButtonBox.Ok)
+            btns.accepted.connect(dlg.accept)
+            lay.addWidget(btns)
+
+            dlg.exec_()
             self._load_warnings = []
 
     def _optimize_all_split_positions(self, fname=None):
@@ -9841,70 +10140,121 @@ class MainWindow(QMainWindow):
                 "background-color: #3949ab; color: white; font-weight: bold; "
                 "border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
 
+    def _compute_truck_avail_routes(self, fname):
+        """Compute day and night route timing data for the truck avail timeline.
+        Returns (day_routes, night_routes, night_start_mins).
+        """
+        suppress = (self._suppress_no_milking_cb.isChecked()
+                    if hasattr(self, "_suppress_no_milking_cb") else True)
+        dm     = self.dm
+        dm_dur = getattr(self, "dm_dur", None)
+        cache  = self._cache
+
+        night_start_mins = None
+        for entry in cache.get(fname, {}).values():
+            if not isinstance(entry, dict):
+                continue
+            st = entry.get("start_time")
+            if st is None or _is_day_sheet(st):
+                continue
+            t = st.time() if isinstance(st, datetime) else st
+            m = t.hour * 60 + t.minute
+            if night_start_mins is None or m < night_start_mins:
+                night_start_mins = m
+
+        day_routes = []
+        for sname, entry in cache.get(fname, {}).items():
+            if not isinstance(entry, dict):
+                continue
+            st     = entry.get("start_time")
+            colour = entry.get("day_colour", "")
+            if st is None or not _is_day_sheet(st):
+                continue
+            if colour not in ("RED", "BLUE"):
+                continue
+            blocks = self._sheet_mods.get((fname, sname), entry.get("blocks", []))
+            try:
+                ct = calc_times(blocks, dm, st, dm_dur, suppress_no_milking=suppress)
+            except Exception:
+                continue
+            if ct is None:
+                continue
+            all_times, end_cursor = ct
+            if end_cursor is None:
+                continue
+            t_st  = st.time()         if isinstance(st,         datetime) else st
+            t_end = end_cursor.time() if isinstance(end_cursor, datetime) else end_cursor
+            sm = t_st.hour  * 60 + t_st.minute
+            em = t_end.hour * 60 + t_end.minute
+            if em < sm:
+                em += 24 * 60
+            on_time = night_start_mins is None or em <= night_start_mins
+            segs = _route_stop_segments(blocks, all_times, sm)
+            day_routes.append({
+                "sname":      sname,
+                "colour":     colour,
+                "start_mins": sm,
+                "end_mins":   em,
+                "on_time":    on_time,
+                "segments":   segs,
+            })
+
+        night_routes = []
+        for sname, entry in cache.get(fname, {}).items():
+            if not isinstance(entry, dict):
+                continue
+            st     = entry.get("start_time")
+            colour = entry.get("day_colour", "")
+            if st is None or _is_day_sheet(st):
+                continue
+            if colour not in ("RED", "BLUE"):
+                continue
+            t_st = st.time() if isinstance(st, datetime) else st
+            sm   = t_st.hour * 60 + t_st.minute
+            blocks = self._sheet_mods.get((fname, sname), entry.get("blocks", []))
+            em   = None
+            segs = []
+            try:
+                ct = calc_times(blocks, dm, st, dm_dur, suppress_no_milking=suppress)
+                if ct is not None:
+                    all_times, end_cursor = ct
+                    if end_cursor is not None:
+                        t_end = end_cursor.time() if isinstance(end_cursor, datetime) else end_cursor
+                        em = t_end.hour * 60 + t_end.minute
+                        if em < sm:
+                            em += 24 * 60
+                        segs = _route_stop_segments(blocks, all_times, sm)
+            except Exception:
+                pass
+            night_routes.append({
+                "sname":      sname,
+                "colour":     colour,
+                "start_mins": sm,
+                "end_mins":   em,
+                "segments":   segs,
+            })
+
+        day_routes.sort(  key=lambda r: r["start_mins"])
+        night_routes.sort(key=lambda r: r["start_mins"])
+        return day_routes, night_routes, night_start_mins
+
     def _on_truck_avail_visualize(self):
-        """Open the TruckAvailDialog showing day-route return times."""
+        """Open (or refresh) the TruckAvailDialog showing full route timelines."""
         fname = self.file_cb.currentText()
         if not fname or fname not in self._cache:
             QMessageBox.information(self, "No file", "Load a file first.")
             return
         try:
-            suppress = (self._suppress_no_milking_cb.isChecked()
-                        if hasattr(self, "_suppress_no_milking_cb") else True)
-            dm     = self.dm
-            dm_dur = getattr(self, "dm_dur", None)
-            cache  = self._cache
-
-            # Auto-detect night shift start
-            night_start_mins = None
-            for entry in cache.get(fname, {}).values():
-                if not isinstance(entry, dict):
-                    continue
-                st = entry.get("start_time")
-                if st is None or _is_day_sheet(st):
-                    continue
-                t = st.time() if isinstance(st, datetime) else st
-                m = t.hour * 60 + t.minute
-                if night_start_mins is None or m < night_start_mins:
-                    night_start_mins = m
-
-            # Compute end times for every day route
-            routes = []
-            for sname, entry in cache.get(fname, {}).items():
-                if not isinstance(entry, dict):
-                    continue
-                st = entry.get("start_time")
-                if st is None or not _is_day_sheet(st):
-                    continue
-                blocks = self._sheet_mods.get((fname, sname),
-                                              entry.get("blocks", []))
-                try:
-                    ct = calc_times(blocks, dm, st, dm_dur,
-                                    suppress_no_milking=suppress)
-                except Exception:
-                    continue
-                if ct is None:
-                    continue
-                _, end_cursor = ct
-                if end_cursor is None:
-                    continue
-                t_st  = st.time()         if isinstance(st,         datetime) else st
-                t_end = end_cursor.time() if isinstance(end_cursor, datetime) else end_cursor
-                sm = t_st.hour  * 60 + t_st.minute
-                em = t_end.hour * 60 + t_end.minute
-                if em < sm:
-                    em += 24 * 60
-                on_time = night_start_mins is None or em <= night_start_mins
-                routes.append({
-                    "sname":      sname,
-                    "colour":     entry.get("day_colour", ""),
-                    "start_mins": sm,
-                    "end_mins":   em,
-                    "on_time":    on_time,
-                })
-
-            routes.sort(key=lambda r: r["start_mins"])
-            dlg = TruckAvailDialog(routes, night_start_mins, self)
-            dlg.exec_()
+            day_routes, night_routes, night_start_mins = \
+                self._compute_truck_avail_routes(fname)
+            dlg = getattr(self, "_truck_avail_dlg", None)
+            if dlg and dlg.isVisible():
+                dlg.update_routes(day_routes, night_routes, night_start_mins)
+                dlg.raise_()
+            else:
+                dlg = TruckAvailDialog(day_routes, night_routes, night_start_mins, self)
+                self._truck_avail_dlg = dlg
+                dlg.show()
         except Exception as _exc:
             import traceback as _tb
             QMessageBox.critical(
