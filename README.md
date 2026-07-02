@@ -1,7 +1,9 @@
 
-current ver: viewer211
+current ver: viewer212
 
 ver history
+
+212: map visualizer fixes. most likely final ver for a while
 
 211: added map visualizer, in beta
 
