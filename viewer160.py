@@ -1,5 +1,5 @@
 """
-viewer.py  -  Route Sheet Viewer
+viewer.py  -  Vedder D100 Route Manager
 """
 
 import re, sys, csv, copy, random, math, time, uuid, logging
@@ -12,10 +12,13 @@ from PyQt5.QtWidgets import (
     QFrame, QHeaderView, QAbstractItemView, QTabWidget, QSplitter,
     QScrollBar, QScrollArea, QDoubleSpinBox, QSpinBox, QProgressBar,
     QGroupBox, QCheckBox, QTextEdit, QSizePolicy, QDialog,
-    QLineEdit, QMessageBox, QFileDialog, QToolTip, QButtonGroup
+    QLineEdit, QMessageBox, QFileDialog, QToolTip, QButtonGroup,
+    QGraphicsScene, QGraphicsView, QGraphicsEllipseItem,
+    QGraphicsRectItem, QGraphicsPixmapItem, QDialogButtonBox
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray
-from PyQt5.QtGui import QFont, QColor, QDrag, QPainter, QPen, QBrush
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray, QObject, QRectF, QPointF
+from PyQt5.QtGui import (QFont, QColor, QDrag, QPainter, QPen, QBrush,
+                         QTransform, QPixmap, QPainterPath)
 
 import openpyxl
 from openpyxl.styles import Font, Border, Side
@@ -114,6 +117,13 @@ SOLVER_SKIP_SHEETS = {"1603", "1604",
                       "1081", "1451", "1281", "1441", "1121", "1561", "1211",
                       "1421", "1431", "1023",
                       "1123", "1521", "1551", "1381"}
+
+# Mennonite farms — no pickup on Sundays.  Highlighted in the route viewer
+# for planner awareness; solver logic is not affected.
+MENNONITE_FARMS = {
+    "92-590", "07-400", "99-020", "64-386",
+    "92-808", "53-530", "92-904", "59-218",
+}
 
 # Default plant receiving windows (open HH:MM, close HH:MM).
 # None means 24/7 - no restriction.  Overnight windows (close < open) are
@@ -1335,7 +1345,11 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
                 f_i      = farms_by_id.get(id(row_data), 0)
                 bg       = CLR_ALT if farm_alt_idx % 2 == 0 else CLR_WHITE
                 farm_alt_idx += 1
-                is_robot = str(row_data.get("m1_start", "")).strip().upper() == "ROBOT"
+                is_robot     = str(row_data.get("m1_start", "")).strip().upper() == "ROBOT"
+                is_mennonite = str(row_data.get("irma", "")).strip() in MENNONITE_FARMS
+                if is_mennonite:
+                    bg = QColor("#e1bee7")   # light purple
+                MENNONITE_TIP = "Mennonite farm — no pickup on Sunday."
                 milking_conflict = arrives_during_milking(arr_t, row_data, suppress_no_milking=suppress_no_milking)
                 for c_idx, (_, key) in enumerate(COLS):
                     if key == "dist":
@@ -1386,18 +1400,20 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
                             display_val = row_data.get(key, "")
                         item = make_data_item(display_val, bg=bg, draggable=editable)
                     item.setData(Qt.UserRole, (b_idx, f_i))
+                    if is_mennonite:
+                        item.setToolTip(MENNONITE_TIP)
                     table.setItem(r, c_idx, item)
-
-                # ROBOT farms: merge all 4 milking columns into one labelled cell
                 if is_robot:
                     m1s_col = next(i for i, (_, k) in enumerate(COLS) if k == "m1_start")
+                    robot_bg = QColor("#e1bee7") if is_mennonite else QColor("#e8f5e9")
                     robot_item = make_data_item(
-                        "ROBOT", bg=QColor("#e8f5e9"),
-                        align=Qt.AlignCenter)
+                        "ROBOT", bg=robot_bg, align=Qt.AlignCenter)
                     rf = robot_item.font(); rf.setBold(True)
                     robot_item.setFont(rf)
                     robot_item.setForeground(QColor("#2e7d32"))
                     robot_item.setData(Qt.UserRole, (b_idx, f_i))
+                    if is_mennonite:
+                        robot_item.setToolTip(MENNONITE_TIP)
                     table.setItem(r, m1s_col, robot_item)
                     # Clear the 3 hidden cells so Qt doesn't show stale data
                     for span_key in ("m1_finish", "m2_start", "m2_finish"):
@@ -6216,10 +6232,403 @@ class ProcessorScheduleDialog(QDialog):
 
 # -- Main window ---------------------------------------------------------------
 
+class MapDialog(QDialog):
+    """Modal map dialog showing one block of the current sheet at a time.
+
+    Reads road geometry from routes.db (searched for beside the exe).
+    Uses the same Web Mercator projection and OSM tile system as map_tester.py.
+    """
+
+    _TILE_URL    = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    _TILE_CACHE  = Path.home() / ".cache" / "map_tester_tiles"
+    _TILE_ZOOM   = 13
+    _TILE_BOUNDS = (49.00, 49.38, -123.30, -121.40)
+    _ROUTE_COLS  = [
+        QColor("#1e90ff"), QColor("#ff4444"), QColor("#44cc44"),
+        QColor("#ff9900"), QColor("#cc44ff"), QColor("#00cccc"),
+    ]
+
+    # ── tiny helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _find_db():
+        """Return path to routes.db beside the exe (or script in dev mode)."""
+        here = (Path(sys.executable).parent
+                if getattr(sys, "frozen", False)
+                else Path(__file__).parent)
+        return here / "routes.db"
+
+    @staticmethod
+    def _merc(lat, lon):
+        x =  math.radians(lon)
+        y = -math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+        return x, y
+
+    @staticmethod
+    def _tile_xy(lat, lon, z):
+        n  = 2 ** z
+        tx = int((lon + 180) / 360 * n)
+        lr = math.radians(lat)
+        ty = int((1 - math.log(math.tan(lr) + 1 / math.cos(lr)) / math.pi) / 2 * n)
+        return tx, ty
+
+    @staticmethod
+    def _tile_nw(tx, ty, z):
+        n   = 2 ** z
+        lon = tx / n * 360 - 180
+        lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * ty / n))))
+        return lat, lon
+
+    def _to_scene(self, lat, lon):
+        mx, my = self._merc(lat, lon)
+        return mx * self._scale + self._ox, my * self._scale + self._oy
+
+    # ── construction ──────────────────────────────────────────────────────────
+
+    def __init__(self, blocks, sname, irma_lookup, parent=None):
+        """
+        blocks      : list of block dicts for this sheet
+        sname       : sheet name (for window title)
+        irma_lookup : {irma: (lat, lon)} for all known locations
+        """
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setWindowTitle(f"Route Map — {sname}")
+        self.setMinimumSize(1000, 680)
+        self.resize(1200, 780)
+
+        self._blocks     = blocks
+        self._irma_locs  = irma_lookup
+        self._block_idx  = 0
+        self._tile_items = {}
+        self._route_items = []
+        self._tile_loader = None
+
+        # DB
+        db_path = self._find_db()
+        self._db_ok = db_path.exists()
+        self._db    = None
+        if self._db_ok:
+            import sqlite3 as _sq
+            self._con = _sq.connect(str(db_path), check_same_thread=False)
+        else:
+            self._con = None
+
+        # Projection from all known coords
+        lats = [v[0] for v in irma_lookup.values()]
+        lons = [v[1] for v in irma_lookup.values()]
+        if lats:
+            lat_min = min(lats) - 0.05; lat_max = max(lats) + 0.05
+            lon_min = min(lons) - 0.05; lon_max = max(lons) + 0.05
+        else:
+            lat_min, lat_max, lon_min, lon_max = 49.0, 49.4, -123.3, -121.5
+
+        mW, mH, margin = 1160, 720, 50
+        mx0, my0 = self._merc(lat_max, lon_min)
+        mx1, my1 = self._merc(lat_min, lon_max)
+        self._scale = min((mW - 2*margin) / (mx1 - mx0),
+                          (mH - 2*margin) / (my1 - my0))
+        self._ox = margin - mx0 * self._scale
+        self._oy = margin - my0 * self._scale
+
+        # ── Layout ────────────────────────────────────────────────────────────
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(4)
+
+        # Top bar: block nav + status
+        top = QHBoxLayout()
+        self._prev_btn = QPushButton("◀ Prev Block")
+        self._next_btn = QPushButton("Next Block ▶")
+        for b in (self._prev_btn, self._next_btn):
+            b.setFixedHeight(26)
+            b.setStyleSheet(
+                "QPushButton{background:#1565c0;color:white;font-weight:bold;"
+                "border-radius:3px;padding:0 10px;}"
+                "QPushButton:disabled{background:#90caf9;}")
+        self._prev_btn.clicked.connect(lambda: self._show_block(self._block_idx - 1))
+        self._next_btn.clicked.connect(lambda: self._show_block(self._block_idx + 1))
+        self._block_lbl = QLabel("")
+        self._block_lbl.setStyleSheet("font-weight:bold;")
+        top.addWidget(self._prev_btn)
+        top.addWidget(self._block_lbl)
+        top.addWidget(self._next_btn)
+        top.addSpacing(20)
+        self._status_lbl = QLabel("Loading tiles…" if self._db_ok
+                                  else "⚠ routes.db not found — geometry unavailable")
+        self._status_lbl.setStyleSheet(
+            "color:#555;" if self._db_ok else "color:#c62828;font-weight:bold;")
+        top.addWidget(self._status_lbl)
+        top.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        top.addWidget(close_btn)
+        lay.addLayout(top)
+
+        # Map view
+        self._scene = QGraphicsScene(self)
+        self._view  = QGraphicsView(self._scene)
+        self._view.setRenderHint(QPainter.Antialiasing)
+        self._view.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self._view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self._view.setBackgroundBrush(QBrush(QColor("#1a2332")))
+        self._view.setStyleSheet("border:none;")
+        self._view.wheelEvent = self._wheel
+        lay.addWidget(self._view, stretch=1)
+
+        # Build base scene + load tiles
+        self._build_base()
+        self._load_tiles()
+        self._show_block(0)
+
+    def _wheel(self, ev):
+        f = 1.15 if ev.angleDelta().y() > 0 else 1 / 1.15
+        self._view.scale(f, f)
+
+    def closeEvent(self, ev):
+        if self._con:
+            self._con.close()
+        super().closeEvent(ev)
+
+    # ── Scene base (all dots) ─────────────────────────────────────────────────
+
+    def _build_base(self):
+        self._scene.clear()
+        self._tile_items.clear()
+        x0, y0 = self._to_scene(49.40, -123.35)
+        x1, y1 = self._to_scene(48.95, -121.35)
+        self._scene.setSceneRect(QRectF(x0, y0, x1-x0, y1-y0))
+
+        # Dim dots for every known location
+        pen = QPen(QColor("#445566"), 0.8)
+        for irma, (lat, lon) in self._irma_locs.items():
+            x, y = self._to_scene(lat, lon)
+            r    = 2.5
+            dot  = QGraphicsEllipseItem(-r, -r, r*2, r*2)
+            dot.setPen(pen)
+            if irma.isdigit():
+                dot.setBrush(QBrush(QColor("#e53935")))
+            elif irma == "VEDDER":
+                dot.setBrush(QBrush(QColor("#ffd600")))
+            else:
+                dot.setBrush(QBrush(QColor("#334455")))
+            dot.setFlag(dot.ItemIgnoresTransformations, True)
+            dot.setPos(x, y)
+            dot.setZValue(2)
+            dot.setToolTip(irma)
+            self._scene.addItem(dot)
+
+        self._view.fitInView(
+            QRectF(*self._to_scene(49.38, -123.30),
+                   self._to_scene(49.00, -121.40)[0] - self._to_scene(49.38, -123.30)[0],
+                   self._to_scene(49.00, -121.40)[1] - self._to_scene(49.38, -123.30)[1]),
+            Qt.KeepAspectRatio)
+
+    # ── OSM tile loading ──────────────────────────────────────────────────────
+
+    def _load_tiles(self):
+        lat_min, lat_max, lon_min, lon_max = self._TILE_BOUNDS
+        z   = self._TILE_ZOOM
+        tx0, ty0 = self._tile_xy(lat_max, lon_min, z)
+        tx1, ty1 = self._tile_xy(lat_min, lon_max, z)
+        tiles = [(tx, ty) for ty in range(ty0, ty1+1) for tx in range(tx0, tx1+1)]
+
+        self._TILE_CACHE.mkdir(parents=True, exist_ok=True)
+        self._sig  = _TileSignaller()
+        self._sig.tile_ready.connect(self._on_tile)
+        self._loader = _TileLoaderThread(tiles, z, self._sig, self._TILE_URL,
+                                         self._TILE_CACHE)
+        self._loader.finished.connect(lambda: self._status_lbl.setText(
+            "Tiles loaded." if self._db_ok else self._status_lbl.text()))
+        self._loader.start()
+
+    def _on_tile(self, z, tx, ty, pixmap):
+        if z != self._TILE_ZOOM:
+            return
+        lat_nw, lon_nw = self._tile_nw(tx,   ty,   z)
+        lat_se, lon_se = self._tile_nw(tx+1, ty+1, z)
+        x0, y0 = self._to_scene(lat_nw, lon_nw)
+        x1, y1 = self._to_scene(lat_se, lon_se)
+        item = self._scene.addPixmap(pixmap)
+        item.setPos(x0, y0)
+        sx = (x1-x0) / 256
+        sy = (y1-y0) / 256
+        item.setTransform(QTransform.fromScale(sx, sy))
+        item.setOpacity(0.85)
+        item.setZValue(0)
+        self._tile_items[(tx, ty)] = item
+
+    # ── Route drawing ─────────────────────────────────────────────────────────
+
+    def _clear_route(self):
+        for item in self._route_items:
+            self._scene.removeItem(item)
+        self._route_items = []
+
+    def _get_geom(self, origin, dest):
+        """Return [(lat,lon),...] from routes.db, or None."""
+        if not self._con:
+            return None
+        import struct as _st
+        row = self._con.execute(
+            "SELECT geometry FROM routes WHERE origin=? AND dest=?",
+            (origin, dest)).fetchone()
+        if not row or not row[0]:
+            return None
+        data = row[0]
+        n    = len(data) // 4
+        vals = _st.unpack(f"{n}f", data)
+        return [(vals[i], vals[i+1]) for i in range(0, n, 2)]
+
+    def _show_block(self, idx):
+        idx = max(0, min(idx, len(self._blocks) - 1))
+        self._block_idx = idx
+        self._prev_btn.setEnabled(idx > 0)
+        self._next_btn.setEnabled(idx < len(self._blocks) - 1)
+        n = len(self._blocks)
+        self._block_lbl.setText(f"Block {idx+1} of {n}")
+        self._clear_route()
+
+        block   = self._blocks[idx]
+        is_last = (idx == len(self._blocks) - 1)
+        origin  = ("VEDDER" if idx == 0
+                   else (_block_last_dest_key(self._blocks[idx-1]) or "VEDDER"))
+        stops   = _build_block_stops(block, origin, is_last)
+
+        # Build ordered key list
+        keys = [s["key"] for s in stops if s["key"] and s["type"] != "origin"]
+        keys = [origin] + keys   # prepend the actual origin
+
+        total_m = 0
+
+        for i, (a, b) in enumerate(zip(keys, keys[1:])):
+            colour = self._ROUTE_COLS[i % len(self._ROUTE_COLS)]
+            geom   = self._get_geom(a, b)
+
+            if geom:
+                pts = geom
+            elif a in self._irma_locs and b in self._irma_locs:
+                # Straight-line fallback
+                pts = [self._irma_locs[a], self._irma_locs[b]]
+                colour = QColor(colour.red(), colour.green(), colour.blue(), 120)
+
+            else:
+                continue
+
+            path  = QPainterPath()
+            first = True
+            for lat, lon in pts:
+                x, y = self._to_scene(lat, lon)
+                if first: path.moveTo(x, y); first = False
+                else:     path.lineTo(x, y)
+
+            shp = QPen(QColor(0, 0, 0, 100), 3); shp.setCosmetic(True)
+            self._route_items.append(self._scene.addPath(path, shp))
+
+            lp = QPen(colour, 2); lp.setCosmetic(True)
+            lp.setCapStyle(Qt.RoundCap); lp.setJoinStyle(Qt.RoundJoin)
+            self._route_items.append(self._scene.addPath(path, lp))
+
+        # Highlight stop dots + tooltips
+        font = QFont("Calibri", 7); font.setBold(True)
+        for seq, stop in enumerate(stops):
+            key = stop["key"]
+            if not key or key not in self._irma_locs:
+                continue
+            lat, lon = self._irma_locs[key]
+            x, y = self._to_scene(lat, lon)
+            r = 5.5
+
+            if stop["type"] == "dest":
+                fill = QColor("#ff6d00"); tip_prefix = "Processor"
+            elif stop["type"] == "vedder":
+                fill = QColor("#ffd600"); tip_prefix = "Depot"
+            elif stop["type"] == "origin":
+                fill = QColor("#ffd600"); tip_prefix = "Depot"
+            else:
+                fill = (QColor("#e1bee7") if key in MENNONITE_FARMS
+                        else QColor("#43a047"))
+                tip_prefix = "Farm"
+
+            # Farm name from irma_lookup dict (stored as tooltip on base dot)
+            name = ""
+            if stop["type"] == "farm" and stop.get("farm"):
+                ec = stop["farm"].get("_extra_cells") or {}
+                name = ec.get(18, "") or ""
+            tip = f"{tip_prefix}: {key}" + (f"\n{name}" if name else "")
+
+            dot = QGraphicsEllipseItem(-r, -r, r*2, r*2)
+            dot.setPen(QPen(QColor("#222"), 1))
+            dot.setBrush(QBrush(fill))
+            dot.setFlag(dot.ItemIgnoresTransformations, True)
+            dot.setPos(x, y)
+            dot.setZValue(6)
+            dot.setToolTip(tip)
+            self._scene.addItem(dot)
+            self._route_items.append(dot)
+
+            # Sequence number label
+            num  = self._scene.addText(str(seq), font)
+            num.setDefaultTextColor(QColor("#ffffff"))
+            num.setFlag(num.ItemIgnoresTransformations, True)
+            num.setPos(x + r + 1, y - num.boundingRect().height() / 2)
+            num.setZValue(7)
+            num.setToolTip(tip)
+            self._route_items.append(num)
+
+        if not self._db_ok:
+            self._status_lbl.setText("⚠ routes.db not found — place it beside the exe")
+        else:
+            self._status_lbl.setText(
+                f"Block {idx+1}/{n}  ·  {len(stops)-2} farm/processor stops")
+
+
+# ── Tile loader helpers (shared with map_tester style) ─────────────────────
+
+class _TileSignaller(QObject):
+    tile_ready = pyqtSignal(int, int, int, object)
+
+
+class _TileLoaderThread(QThread):
+    def __init__(self, tiles, zoom, sig, url_tmpl, cache_dir, parent=None):
+        super().__init__(parent)
+        self._tiles    = tiles
+        self._zoom     = zoom
+        self._sig      = sig
+        self._url_tmpl = url_tmpl
+        self._cache    = cache_dir
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(self._one, self._tiles))
+
+    def _one(self, tile):
+        tx, ty = tile
+        z      = self._zoom
+        cache_path = self._cache / f"{z}_{tx}_{ty}.png"
+        if cache_path.exists():
+            pm = QPixmap(str(cache_path))
+        else:
+            url = self._url_tmpl.format(z=z, x=tx, y=ty)
+            try:
+                import urllib.request as _ur
+                req  = _ur.Request(url, headers={"User-Agent": "VedderD100RouteManager/1.0"})
+                data = _ur.urlopen(req, timeout=10).read()
+                cache_path.write_bytes(data)
+                pm = QPixmap(); pm.loadFromData(data)
+            except Exception:
+                return
+        if not pm.isNull():
+            self._sig.tile_ready.emit(z, tx, ty, pm)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Route Sheet Viewer")
+        self.setWindowTitle("Vedder D100 Route Manager")
         self.resize(1700, 960)
         self.data_root    = get_exe_dir() / "anonymized_output"
         self.dm           = load_distance_matrix(get_data_dir() / "distance_matrix.csv")
@@ -6477,6 +6886,20 @@ class MainWindow(QMainWindow):
         self._search_prev_btn.clicked.connect(self._on_search_prev)
         self._search_clear_btn.clicked.connect(self._on_search_clear)
         rt.addWidget(search_frame)
+
+        # "View on Map" button — lives in the search bar row
+        self._map_btn = QPushButton("🗺 View on Map")
+        self._map_btn.setFixedHeight(28)
+        self._map_btn.setStyleSheet(
+            "QPushButton{background:#2e7d32;color:white;font-weight:bold;"
+            "border-radius:4px;font-size:8pt;padding:0 10px;}"
+            "QPushButton:disabled{background:#a5d6a7;}")
+        self._map_btn.setToolTip(
+            "Open a map showing the current sheet's route.\n"
+            "Requires routes.db beside the exe.")
+        self._map_btn.clicked.connect(self._on_view_on_map)
+        search_frame.setMaximumHeight(999)  # allow taller if needed
+        sl.addWidget(self._map_btn)
 
         # Internal search state - populated by _on_search()
         # List of (table, visual_row) for every match, in top-to-bottom order
@@ -7366,6 +7789,158 @@ class MainWindow(QMainWindow):
         dl.addWidget(self._debug_text, stretch=1)
 
         self.tabs.addTab(debug_tab, "Debug")
+
+        # ── Farm Summary tab ─────────────────────────────────────────────────
+        farm_sum_tab = QWidget()
+        fs_l = QVBoxLayout(farm_sum_tab)
+        fs_l.setContentsMargins(8, 8, 8, 8)
+        fs_l.setSpacing(6)
+
+        # Filter row
+        fs_top = QHBoxLayout()
+        fs_top.addWidget(QLabel("Show:"))
+        self._fs_filter = "ALL"
+        self._fs_btns   = {}
+        for lbl in ("All", "RED", "BLUE"):
+            b = QPushButton(lbl)
+            b.setCheckable(True)
+            b.setChecked(lbl == "All")
+            b.setFixedWidth(64)
+            b.clicked.connect(lambda _, l=lbl: self._set_farm_summary_filter(l.upper()
+                                                                              if l != "All" else "ALL"))
+            self._fs_btns[lbl] = b
+            fs_top.addWidget(b)
+        fs_top.addSpacing(16)
+        self._fs_count_lbl = QLabel("")
+        self._fs_count_lbl.setStyleSheet("color:#555555; font-size:8pt;")
+        fs_top.addWidget(self._fs_count_lbl)
+        fs_top.addStretch()
+        fs_l.addLayout(fs_top)
+
+        # Table
+        FS_COLS = ["IRMA", "Name", "M1 Start", "M1 End",
+                   "M2 Start", "M2 End", "Volume (L)", "Sheets"]
+        self._fs_table = QTableWidget(0, len(FS_COLS))
+        self._fs_table.setHorizontalHeaderLabels(FS_COLS)
+        self._fs_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._fs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._fs_table.setAlternatingRowColors(True)
+        self._fs_table.verticalHeader().setVisible(False)
+        hdr = self._fs_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)   # Name stretches
+        hdr.setSectionResizeMode(7, QHeaderView.Stretch)   # Sheets stretches
+        self._fs_table.setStyleSheet("font-size: 8pt;")
+        fs_l.addWidget(self._fs_table, stretch=1)
+
+        self.tabs.insertTab(2, farm_sum_tab, "Farm Summary")
+
+    def _set_farm_summary_filter(self, bucket):
+        self._fs_filter = bucket
+        for lbl, btn in self._fs_btns.items():
+            btn.setChecked((lbl.upper() if lbl != "All" else "ALL") == bucket)
+        self._refresh_farm_summary()
+
+    def _refresh_farm_summary(self):
+        """Rebuild the Farm Summary table from the currently loaded file."""
+        fname = self.file_cb.currentText()
+        self._fs_table.setRowCount(0)
+        if not fname or fname not in self._cache:
+            self._fs_count_lbl.setText("(no file loaded)")
+            return
+
+        bucket = self._fs_filter   # "ALL", "RED", or "BLUE"
+
+        # Aggregate: {irma -> {name, m1_start, m1_finish, m2_start, m2_finish,
+        #                       total_vol, sheets: set}}
+        farms = {}
+        for sname, entry in self._cache[fname].items():
+            if not isinstance(entry, dict):
+                continue
+            colour = entry.get("day_colour", "")
+            if bucket != "ALL" and colour != bucket:
+                continue
+            for block in entry.get("blocks", []):
+                for row in block.get("rows", []):
+                    irma = str(row.get("irma") or "").strip()
+                    if not irma:
+                        continue
+                    if irma not in farms:
+                        name = (row.get("_extra_cells") or {}).get(18, "") or ""
+                        farms[irma] = {
+                            "name":      name,
+                            "m1_start":  str(row.get("m1_start")  or "").strip(),
+                            "m1_finish": str(row.get("m1_finish") or "").strip(),
+                            "m2_start":  str(row.get("m2_start")  or "").strip(),
+                            "m2_finish": str(row.get("m2_finish") or "").strip(),
+                            "total_vol": 0.0,
+                            "sheets":    set(),
+                        }
+                    vol = row.get("prior_vol") or 0
+                    try:
+                        farms[irma]["total_vol"] += float(vol)
+                    except (TypeError, ValueError):
+                        pass
+                    farms[irma]["sheets"].add(sname)
+
+        if not farms:
+            self._fs_count_lbl.setText("No farms found.")
+            return
+
+        # Sort by IRMA (numeric part then alpha)
+        def irma_sort_key(k):
+            parts = k.replace("-", " ").split()
+            try:    return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+            except: return (999999, 0)
+
+        sorted_irmas = sorted(farms.keys(), key=irma_sort_key)
+
+        CLR_MENN   = QColor("#e1bee7")
+        CLR_WHITE  = QColor("#ffffff")
+        CLR_ALT    = QColor("#f5f5f5")
+        MENN_TIP   = "Mennonite farm — no pickup on Sunday."
+
+        self._fs_table.setRowCount(len(sorted_irmas))
+        for row_idx, irma in enumerate(sorted_irmas):
+            d  = farms[irma]
+            is_menn = irma in MENNONITE_FARMS
+            bg = CLR_MENN if is_menn else (CLR_ALT if row_idx % 2 == 0 else CLR_WHITE)
+
+            sheets_str = ", ".join(sorted(d["sheets"]))
+            vol_str    = f"{int(d['total_vol']):,}" if d["total_vol"] else ""
+
+            values = [
+                irma,
+                d["name"],
+                d["m1_start"],
+                d["m1_finish"],
+                d["m2_start"],
+                d["m2_finish"],
+                vol_str,
+                sheets_str,
+            ]
+            for col_idx, val in enumerate(values):
+                item = QTableWidgetItem(str(val))
+                item.setBackground(bg)
+                if col_idx == 6:   # volume — right-align
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if col_idx in (2, 3, 4, 5):   # milking times — center
+                    item.setTextAlignment(Qt.AlignCenter)
+                if is_menn:
+                    item.setToolTip(MENN_TIP)
+                # IRMA bold
+                if col_idx == 0:
+                    f = item.font(); f.setBold(True); item.setFont(f)
+                # ROBOT milking — italic grey
+                if col_idx in (2, 3, 4, 5) and val.upper() == "ROBOT":
+                    item.setForeground(QColor("#2e7d32"))
+                    f = item.font(); f.setBold(True); item.setFont(f)
+                self._fs_table.setItem(row_idx, col_idx, item)
+
+        self._fs_count_lbl.setText(
+            f"{len(sorted_irmas)} farm{'s' if len(sorted_irmas) != 1 else ''}  "
+            f"({sum(1 for i in sorted_irmas if i in MENNONITE_FARMS)} Mennonite)"
+        )
 
     def _collect_processor_schedule(self):
         """Build a list of processor visits across every sheet in the
@@ -9999,6 +10574,7 @@ class MainWindow(QMainWindow):
         self._populate_irma_dropdown()
         self._refresh_truck_avail_label()
         self._populate_proc_dropdown()
+        self._refresh_farm_summary()
         # Optimize partial-dropoff split positions FIRST
         if hasattr(self, "_chk_split_opt") and self._chk_split_opt.isChecked():
             self._optimize_all_split_positions(fname)
@@ -10139,6 +10715,40 @@ class MainWindow(QMainWindow):
             self.shift_type_box.setStyleSheet(
                 "background-color: #3949ab; color: white; font-weight: bold; "
                 "border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
+
+    def _on_view_on_map(self):
+        """Open the MapDialog for the current sheet."""
+        fname = self.file_cb.currentText()
+        sname = self.sheet_cb.currentText() if hasattr(self, "sheet_cb") else ""
+        if not fname or fname not in self._cache or not sname:
+            QMessageBox.information(self, "Map", "Load a sheet first.")
+            return
+        entry  = self._cache[fname].get(sname)
+        if not isinstance(entry, dict):
+            QMessageBox.information(self, "Map", "No route data for this sheet.")
+            return
+        blocks = self._sheet_mods.get((fname, sname), entry.get("blocks", []))
+        if not blocks:
+            QMessageBox.information(self, "Map", "No blocks in this sheet.")
+            return
+
+        # Load irma -> (lat, lon) from routes.db locations table
+        db_path = MapDialog._find_db()
+        irma_locs = {}
+        if db_path.exists():
+            import sqlite3 as _sq
+            con = _sq.connect(str(db_path))
+            for row in con.execute("SELECT irma, lat, lon FROM locations"):
+                irma_locs[row[0]] = (row[1], row[2])
+            con.close()
+        else:
+            QMessageBox.warning(
+                self, "Map",
+                "routes.db not found beside the exe.\n"
+                "The map will open without road geometry or background tiles.")
+
+        dlg = MapDialog(blocks, sname, irma_locs, parent=self)
+        dlg.exec_()
 
     def _compute_truck_avail_routes(self, fname):
         """Compute day and night route timing data for the truck avail timeline.
@@ -11578,6 +12188,7 @@ def _run_selftests():
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setApplicationName("Vedder D100 Route Manager")
 
     # Populate THREE_WINDOW_FARMS before constructing MainWindow so that
     # calc_times and arrives_during_milking can use it from the start.
