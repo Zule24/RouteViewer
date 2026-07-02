@@ -6232,6 +6232,64 @@ class ProcessorScheduleDialog(QDialog):
 
 # -- Main window ---------------------------------------------------------------
 
+class _VolLegend(QWidget):
+    """Small overlay widget showing the volume→colour gradient legend."""
+    _MAX_VOL = 40_000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(110, 185)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+
+    @staticmethod
+    def vol_color(vol, max_vol=40_000):
+        """Blue (0 L) → Amber (20 k) → Red (40 k)."""
+        t = max(0.0, min(1.0, vol / max_vol))
+        if t < 0.5:
+            s = t * 2
+            r = int(25  + (255 - 25)  * s)
+            g = int(118 + (193 - 118) * s)
+            b = int(210 + (7   - 210) * s)
+        else:
+            s = (t - 0.5) * 2
+            r = int(255 + (211 - 255) * s)
+            g = int(193 + (47  - 193) * s)
+            b = int(7   + (47  - 7)   * s)
+        return QColor(r, g, b)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, False)
+
+        # Background pill
+        p.setBrush(QBrush(QColor(0, 0, 0, 185)))
+        p.setPen(QPen(QColor("#555555"), 1))
+        p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 6, 6)
+
+        # Title
+        p.setPen(QColor("#ffffff"))
+        p.setFont(QFont("Calibri", 8, QFont.Bold))
+        p.drawText(0, 5, 110, 16, Qt.AlignCenter, "Volume (L)")
+
+        # Gradient bar
+        bx, by, bw, bh = 18, 26, 18, 120
+        for py in range(bh):
+            vol = self._MAX_VOL * (1 - py / bh)
+            p.fillRect(bx, by + py, bw, 1, self.vol_color(vol))
+        p.setPen(QPen(QColor("#888888"), 1))
+        p.drawRect(bx, by, bw, bh)
+
+        # Tick labels
+        p.setPen(QColor("#ffffff"))
+        p.setFont(QFont("Calibri", 7))
+        for frac, label in [(1.0, "0"), (0.75, "10k"),
+                             (0.5, "20k"), (0.25, "30k"), (0.0, "40k")]:
+            py = by + int(bh * frac)
+            p.drawLine(bx + bw, py, bx + bw + 3, py)
+            p.drawText(bx + bw + 5, py - 6, 38, 13,
+                       Qt.AlignLeft | Qt.AlignVCenter, label)
+
+
 class MapDialog(QDialog):
     """Modal map dialog showing one block of the current sheet at a time.
 
@@ -6243,10 +6301,6 @@ class MapDialog(QDialog):
     _TILE_CACHE  = Path.home() / ".cache" / "map_tester_tiles"
     _TILE_ZOOM   = 13
     _TILE_BOUNDS = (49.00, 49.38, -123.30, -121.40)
-    _ROUTE_COLS  = [
-        QColor("#1e90ff"), QColor("#ff4444"), QColor("#44cc44"),
-        QColor("#ff9900"), QColor("#cc44ff"), QColor("#00cccc"),
-    ]
 
     # ── tiny helpers ──────────────────────────────────────────────────────────
 
@@ -6285,11 +6339,12 @@ class MapDialog(QDialog):
 
     # ── construction ──────────────────────────────────────────────────────────
 
-    def __init__(self, blocks, sname, irma_lookup, parent=None):
+    def __init__(self, blocks, sname, irma_lookup, all_sheets=None, parent=None):
         """
         blocks      : list of block dicts for this sheet
         sname       : sheet name (for window title)
         irma_lookup : {irma: (lat, lon)} for all known locations
+        all_sheets  : {sname: {"blocks": [...], "day_colour": ...}} for overlay picker
         """
         super().__init__(parent)
         self.setModal(True)
@@ -6298,12 +6353,22 @@ class MapDialog(QDialog):
         self.setMinimumSize(1000, 680)
         self.resize(1200, 780)
 
-        self._blocks     = blocks
-        self._irma_locs  = irma_lookup
-        self._block_idx  = 0
-        self._tile_items = {}
-        self._route_items = []
-        self._tile_loader = None
+        self._blocks        = blocks
+        self._sname         = sname
+        self._irma_locs     = irma_lookup
+        self._all_sheets    = all_sheets or {}
+        self._block_idx     = 0
+        self._tile_items    = {}
+        self._route_items   = []
+        self._overlay_items = {}   # sname -> [scene items]
+        self._overlay_cols  = {}   # sname -> QColor
+        self._tile_loader   = None
+        self._overlay_palette = [
+            QColor("#FF6B6B"), QColor("#4ECDC4"), QColor("#45B7D1"),
+            QColor("#FECA57"), QColor("#FF9FF3"), QColor("#96CEB4"),
+            QColor("#5F27CD"), QColor("#00D2D3"),
+        ]
+        self._palette_idx = 0
 
         # DB
         db_path = self._find_db()
@@ -6366,6 +6431,39 @@ class MapDialog(QDialog):
         top.addWidget(close_btn)
         lay.addLayout(top)
 
+        # Overlay row
+        ov_row = QHBoxLayout()
+        ov_row.addWidget(QLabel("Overlay:"))
+        self._ov_combo = QComboBox()
+        self._ov_combo.setMinimumWidth(160)
+        self._ov_combo.setToolTip("Select a sheet to overlay on this map")
+        other_sheets = sorted(s for s in self._all_sheets if s != sname)
+        self._ov_combo.addItems(other_sheets)
+        ov_row.addWidget(self._ov_combo, stretch=1)
+
+        add_ov_btn = QPushButton("Add")
+        add_ov_btn.setFixedWidth(50)
+        add_ov_btn.setStyleSheet(
+            "QPushButton{background:#37474f;color:white;border-radius:3px;padding:0 6px;}"
+            "QPushButton:hover{background:#546e7a;}")
+        add_ov_btn.clicked.connect(self._on_add_overlay)
+        ov_row.addWidget(add_ov_btn)
+
+        clr_ov_btn = QPushButton("Clear Overlays")
+        clr_ov_btn.setFixedWidth(100)
+        clr_ov_btn.setStyleSheet(
+            "QPushButton{background:#37474f;color:white;border-radius:3px;padding:0 6px;}"
+            "QPushButton:hover{background:#546e7a;}")
+        clr_ov_btn.clicked.connect(self._clear_overlays)
+        ov_row.addWidget(clr_ov_btn)
+
+        ov_row.addSpacing(10)
+        self._ov_chips_layout = QHBoxLayout()
+        self._ov_chips_layout.setSpacing(4)
+        ov_row.addLayout(self._ov_chips_layout)
+        ov_row.addStretch()
+        lay.addLayout(ov_row)
+
         # Map view
         self._scene = QGraphicsScene(self)
         self._view  = QGraphicsView(self._scene)
@@ -6378,10 +6476,22 @@ class MapDialog(QDialog):
         self._view.wheelEvent = self._wheel
         lay.addWidget(self._view, stretch=1)
 
+        # Volume legend — overlaid in the top-right corner of the map view
+        self._legend = _VolLegend(self._view)
+        self._legend.move(self._view.width() - self._legend.width() - 10, 10)
+        self._legend.raise_()
+        self._legend.show()
+
         # Build base scene + load tiles
         self._build_base()
         self._load_tiles()
         # _show_block(0) deferred to showEvent so the view is properly sized first
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if hasattr(self, "_legend"):
+            self._legend.move(
+                self._view.width() - self._legend.width() - 10, 10)
 
     def showEvent(self, ev):
         super().showEvent(ev)
@@ -6474,6 +6584,94 @@ class MapDialog(QDialog):
             self._scene.removeItem(item)
         self._route_items = []
 
+    # ── Overlay methods ───────────────────────────────────────────────────────
+
+    def _on_add_overlay(self):
+        sname = self._ov_combo.currentText()
+        if not sname or sname == self._sname:
+            return
+        if sname in self._overlay_items:
+            return   # already shown
+        entry = self._all_sheets.get(sname)
+        if not isinstance(entry, dict):
+            return
+        blocks = entry.get("blocks", [])
+        if not blocks:
+            return
+        colour = self._overlay_palette[self._palette_idx % len(self._overlay_palette)]
+        self._palette_idx += 1
+        self._overlay_cols[sname]  = colour
+        self._overlay_items[sname] = []
+        self._draw_overlay(sname, blocks, colour)
+        self._add_overlay_chip(sname, colour)
+
+    def _draw_overlay(self, sname, blocks, colour):
+        """Draw all blocks of an overlay sheet as thin semi-transparent lines."""
+        items = self._overlay_items[sname]
+        ov_pen = QPen(QColor(colour.red(), colour.green(), colour.blue(), 190), 1.8)
+        ov_pen.setCosmetic(True)
+        ov_pen.setCapStyle(Qt.RoundCap)
+        ov_pen.setJoinStyle(Qt.RoundJoin)
+
+        for b_idx, block in enumerate(blocks):
+            is_last = (b_idx == len(blocks) - 1)
+            origin  = ("VEDDER" if b_idx == 0
+                       else (_block_last_dest_key(blocks[b_idx-1]) or "VEDDER"))
+            stops   = _build_block_stops(block, origin, is_last)
+            valid   = [(s["key"], s) for s in stops if s.get("key")]
+
+            for (a_key, _a), (b_key, _b) in zip(valid, valid[1:]):
+                if not a_key or not b_key:
+                    continue
+                geom = self._get_geom(a_key, b_key)
+                if geom:
+                    pts = geom
+                elif a_key in self._irma_locs and b_key in self._irma_locs:
+                    pts = [self._irma_locs[a_key], self._irma_locs[b_key]]
+                else:
+                    continue
+                path  = QPainterPath()
+                first = True
+                for lat, lon in pts:
+                    x, y = self._to_scene(lat, lon)
+                    if first: path.moveTo(x, y); first = False
+                    else:     path.lineTo(x, y)
+                item = self._scene.addPath(path, ov_pen)
+                item.setZValue(2)   # below main route (z=3-4)
+                items.append(item)
+
+    def _remove_overlay(self, sname):
+        for item in self._overlay_items.pop(sname, []):
+            self._scene.removeItem(item)
+        self._overlay_cols.pop(sname, None)
+
+    def _clear_overlays(self):
+        for sname in list(self._overlay_items.keys()):
+            self._remove_overlay(sname)
+        # Remove all chips
+        while self._ov_chips_layout.count():
+            w = self._ov_chips_layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+    def _add_overlay_chip(self, sname, colour):
+        """Add a small coloured chip with an × to remove the overlay."""
+        chip = QPushButton(f"× {sname}")
+        chip.setFlat(True)
+        chip.setStyleSheet(
+            f"QPushButton{{"
+            f"background:{colour.name()}; color:{'#000' if colour.lightness() > 128 else '#fff'};"
+            f"border-radius:3px; padding:1px 5px; font-size:7pt; font-weight:bold;}}"
+            f"QPushButton:hover{{opacity:0.8;}}")
+        chip.setToolTip(f"Remove overlay: {sname}")
+        chip.clicked.connect(lambda _, s=sname, c=chip: self._remove_chip(s, c))
+        self._ov_chips_layout.addWidget(chip)
+
+    def _remove_chip(self, sname, chip):
+        self._remove_overlay(sname)
+        self._ov_chips_layout.removeWidget(chip)
+        chip.deleteLater()
+
     def _get_geom(self, origin, dest):
         """Return [(lat,lon),...] from routes.db, or None."""
         if not self._con:
@@ -6504,24 +6702,37 @@ class MapDialog(QDialog):
                    else (_block_last_dest_key(self._blocks[idx-1]) or "VEDDER"))
         stops   = _build_block_stops(block, origin, is_last)
 
-        # Build ordered key list
-        keys = [s["key"] for s in stops if s["key"] and s["type"] != "origin"]
-        keys = [origin] + keys   # prepend the actual origin
+        # Preload = block with no farm stops → treat as full (40 k) throughout
+        is_preload  = not any(s["type"] == "farm" for s in stops)
+        current_vol = 40_000.0 if is_preload else 0.0
 
-        total_m = 0
+        # Filter to stops that have a key and are in irma_locs
+        valid = [(s["key"], s) for s in stops if s.get("key")]
 
-        for i, (a, b) in enumerate(zip(keys, keys[1:])):
-            colour = self._ROUTE_COLS[i % len(self._ROUTE_COLS)]
-            geom   = self._get_geom(a, b)
+        total_vol = 0.0
+
+        for (a_key, a_stop), (b_key, b_stop) in zip(valid, valid[1:]):
+            if not a_key or not b_key:
+                continue
+
+            colour = _VolLegend.vol_color(current_vol)
+            geom   = self._get_geom(a_key, b_key)
 
             if geom:
                 pts = geom
-            elif a in self._irma_locs and b in self._irma_locs:
-                # Straight-line fallback
-                pts = [self._irma_locs[a], self._irma_locs[b]]
-                colour = QColor(colour.red(), colour.green(), colour.blue(), 120)
-
+            elif a_key in self._irma_locs and b_key in self._irma_locs:
+                pts    = [self._irma_locs[a_key], self._irma_locs[b_key]]
+                colour = QColor(colour.red(), colour.green(), colour.blue(), 100)
             else:
+                # Update volume even if we can't draw the segment
+                if b_stop["type"] == "farm" and b_stop.get("farm"):
+                    try:
+                        current_vol = min(40_000.0,
+                            current_vol + float(b_stop["farm"].get("prior_vol") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                elif b_stop["type"] == "dest":
+                    current_vol = 0.0
                 continue
 
             path  = QPainterPath()
@@ -6541,6 +6752,17 @@ class MapDialog(QDialog):
             line = self._scene.addPath(path, lp)
             line.setZValue(4)
             self._route_items.append(line)
+
+            # Update volume on arrival at b
+            if b_stop["type"] == "farm" and b_stop.get("farm"):
+                try:
+                    fv = float(b_stop["farm"].get("prior_vol") or 0)
+                    current_vol = min(40_000.0, current_vol + fv)
+                    total_vol  += fv
+                except (TypeError, ValueError):
+                    pass
+            elif b_stop["type"] == "dest":
+                current_vol = 0.0
 
         # Highlight stop dots + tooltips
         for seq, stop in enumerate(stops):
@@ -6601,8 +6823,10 @@ class MapDialog(QDialog):
         if not self._db_ok:
             self._status_lbl.setText("⚠ routes.db not found — place it beside the exe")
         else:
+            pre_tag = "  [PRELOAD]" if is_preload else ""
+            vol_tag = f"  ·  {int(total_vol):,} L collected" if not is_preload else "  ·  40,000 L (full)"
             self._status_lbl.setText(
-                f"Block {idx+1}/{n}  ·  {len(stops)-2} farm/processor stops")
+                f"Block {idx+1}/{n}  ·  {len(stops)-2} stops{pre_tag}{vol_tag}")
 
 
 # ── Tile loader helpers (shared with map_tester style) ─────────────────────
@@ -10767,7 +10991,9 @@ class MainWindow(QMainWindow):
                 "routes.db not found beside the exe.\n"
                 "The map will open without road geometry or background tiles.")
 
-        dlg = MapDialog(blocks, sname, irma_locs, parent=self)
+        dlg = MapDialog(blocks, sname, irma_locs,
+                        all_sheets=self._cache.get(fname, {}),
+                        parent=self)
         dlg.exec_()
 
     def _compute_truck_avail_routes(self, fname):
