@@ -3163,18 +3163,22 @@ class IntraRouteOptimiser(QThread):
     finished = pyqtSignal(dict)            # {(fname,sname): improved_blocks}
     log      = pyqtSignal(str)
 
-    def __init__(self, fname, cache, dm, cfg, sheet_mods, parent=None, dm_dur=None):
+    def __init__(self, fname, cache, dm, cfg, sheet_mods, parent=None,
+                 dm_dur=None, locked_sheets=None):
         super().__init__(parent)
-        self.fname      = fname
-        self.cache      = cache
-        self.dm         = dm
-        self.dm_dur     = dm_dur
-        self.cfg        = cfg
-        self.sheet_mods = dict(sheet_mods)
+        self.fname         = fname
+        self.cache         = cache
+        self.dm            = dm
+        self.dm_dur        = dm_dur
+        self.cfg           = cfg
+        self.sheet_mods    = dict(sheet_mods)
+        self.locked_sheets = {str(s).strip() for s in (locked_sheets or set())}
 
     def run(self):
         results     = {}
         all_snames  = sorted(self.cache.get(self.fname, {}).keys())
+        skip        = SOLVER_SKIP_SHEETS | self.locked_sheets
+        all_snames  = [s for s in all_snames if s.strip() not in skip]
         total       = len(all_snames)
         n_improved  = 0
 
@@ -7735,21 +7739,6 @@ class MainWindow(QMainWindow):
         self._solver_status.setStyleSheet("color:#555; font-size:8pt;")
         run_l.addWidget(self._solver_status)
 
-        self._chk_route_opt = QCheckBox("Apply route corrections on load & after solve")
-        self._chk_route_opt.setChecked(False)
-        self._chk_route_opt.setToolTip(
-            "When checked, applies two corrections to the Modified panel:\n"
-            "  1. Optimize partial-dropoff positions (e.g. Ridgecrest, Farmhouse)\n"
-            "     to find the farm split that best hits the plant receiving window.\n"
-            "  2. Auto-flag farms with >2h waits in the original solution, giving\n"
-            "     the solver a 2-hour pickup window anchored to the original arrival.\n\n"
-            "Uncheck to fully revert Modified to match Original.")
-        self._chk_route_opt.stateChanged.connect(self._on_route_opt_changed)
-        run_l.addWidget(self._chk_route_opt)
-        # Aliases so existing code references still work
-        self._chk_auto_flag = self._chk_route_opt
-        self._chk_split_opt = self._chk_route_opt
-
         note = QLabel(
             "* % displayed; internally stored as fraction.\n"
             "Results written to Modified panel on all RED/BLUE sheets."
@@ -7940,6 +7929,21 @@ class MainWindow(QMainWindow):
             "Uncheck to re-enable their windows (e.g. for verification).")
         self._suppress_no_milking_cb.stateChanged.connect(self._on_suppress_milking_changed)
         trl.addWidget(self._suppress_no_milking_cb)
+
+        self._chk_route_opt = QCheckBox("Apply route corrections on load & after solve")
+        self._chk_route_opt.setChecked(False)
+        self._chk_route_opt.setToolTip(
+            "When checked, applies two corrections to the Modified panel:\n"
+            "  1. Optimize partial-dropoff positions (e.g. Ridgecrest, Farmhouse)\n"
+            "     to find the farm split that best hits the plant receiving window.\n"
+            "  2. Auto-flag farms with >2h waits in the original solution, giving\n"
+            "     the solver a 2-hour pickup window anchored to the original arrival.\n\n"
+            "Uncheck to fully revert Modified to match Original.")
+        self._chk_route_opt.stateChanged.connect(self._on_route_opt_changed)
+        trl.addWidget(self._chk_route_opt)
+        # Aliases so existing code references still work
+        self._chk_auto_flag = self._chk_route_opt
+        self._chk_split_opt = self._chk_route_opt
 
         plant_win_btn = QPushButton("Plant Window Cost Report")
         plant_win_btn.setFixedHeight(24)
@@ -8633,7 +8637,13 @@ class MainWindow(QMainWindow):
         total_h_before  = total_h_after  = 0.0
         n_improved = 0
 
+        locked_sheets = {sname for sname, cb in self._locked_sheet_cbs.items()
+                         if cb.isChecked()}
+        skip = SOLVER_SKIP_SHEETS | locked_sheets
+
         for sname in sorted(self._cache[fname].keys()):
+            if sname.strip() in skip:
+                continue
             entry = self._cache[fname].get(sname)
             if not isinstance(entry, dict): continue
             start_time = entry.get("start_time")
@@ -10241,9 +10251,11 @@ class MainWindow(QMainWindow):
         }
         self._intra_btn.setEnabled(False)
         self._solve_btn.setEnabled(False)
+        locked_sheets = {sname for sname, cb in self._locked_sheet_cbs.items()
+                         if cb.isChecked()}
         self._intra_thread = IntraRouteOptimiser(
             fname, self._cache, self.dm, cfg, self._sheet_mods, parent=self,
-            dm_dur=self.dm_dur)
+            dm_dur=self.dm_dur, locked_sheets=locked_sheets)
         self._intra_thread.progress.connect(self._on_intra_progress)
         self._intra_thread.finished.connect(self._on_intra_finished)
         self._intra_thread.log.connect(self._solver_log.append)
