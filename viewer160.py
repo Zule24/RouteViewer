@@ -37,7 +37,8 @@ SHEET_RE    = re.compile(r"^\d{4}$")  # kept for display logic
 EXCLUDE_SHEETS = {"INFO", "SHEET1", "SHEET2"}  # sheets with no route data
 MONTH_ORDER = ["january","february","march","april","may","june",
                "july","august","september","october","november","december"]
-VOL_LIMIT   = 41500
+VOL_LIMIT   = 41200   # soft target / penalty threshold (L)
+HARD_CAP    = 44000   # absolute maximum a route may carry (L)
 
 # Litres assumed to be on a preload trailer at the start of the day. This is the
 # starting load that gets offloaded before the day's collection begins.
@@ -2586,7 +2587,7 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
     # the total farm volume overstates the actual peak load.  We walk the stop
     # sequence and track the running load: +farm vol at farm stops, -offload vol
     # at dest stops.  The peak load is what actually matters for capacity.
-    hard_cap      = cfg.get("hard_vol_cap", VOL_LIMIT)
+    hard_cap      = cfg.get("hard_vol_cap", HARD_CAP)
     cap_pen_rate  = cfg.get("cap_penalty", 2.0)
     cap_pen       = 0.0
     for b_idx, block in enumerate(blocks):
@@ -2804,7 +2805,7 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
                                 milking_mins += (end_w3 - arr_dt).total_seconds() / 60.0
 
     # -- cap -------------------------------------------------------------------
-    hard_cap     = cfg.get("hard_vol_cap", VOL_LIMIT)
+    hard_cap     = cfg.get("hard_vol_cap", HARD_CAP)
     cap_pen_rate = cfg.get("cap_penalty", 2.0)
     cap_pen      = 0.0
     for b_idx, block in enumerate(blocks):
@@ -3104,7 +3105,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
     # Shift penalty and cap penalty encoded as additive per-assignment costs.
     vol_tol      = cfg.get("vol_tol", 0.15)
     vol_pen_rate = cfg.get("vol_penalty", 1.0)
-    hard_cap     = cfg.get("hard_vol_cap", VOL_LIMIT)
+    hard_cap     = cfg.get("hard_vol_cap", HARD_CAP)
     cap_pen_rate = cfg.get("cap_penalty", 2.0)
 
     c = []
@@ -5029,7 +5030,7 @@ class ALNSSolver(QThread):
                             ft_f = bt_f[fi_f+1] if (fi_f+1) < len(bt_f) else None
                             if ft_f and ft_f.get("wait"):
                                 _milking_f += ft_f["wait"] * self.cfg.get("milking_weight", 1.0)
-            _hc_f = self.cfg.get("hard_vol_cap", VOL_LIMIT)
+            _hc_f = self.cfg.get("hard_vol_cap", HARD_CAP)
             _cr_f = self.cfg.get("cap_penalty", 2.0)
             for block_f in blocks_f:
                 _rv_f = sum((r.get("prior_vol") or 0) for r in block_f["rows"]
@@ -7605,7 +7606,7 @@ class MainWindow(QMainWindow):
         self._sw_hard_cap = QSpinBox()
         self._sw_hard_cap.setRange(10000, 60000)
         self._sw_hard_cap.setSingleStep(500)
-        self._sw_hard_cap.setValue(42000)
+        self._sw_hard_cap.setValue(HARD_CAP)
         self._sw_hard_cap.setToolTip(
             "Hard truck capacity limit (litres).\n"
             "Routes exceeding this get a stiff per-litre penalty.")
@@ -8053,6 +8054,14 @@ class MainWindow(QMainWindow):
              "Show which farms were added, removed, or moved between\n"
              "the Original and Modified panels for each route.",
              self._on_changelog_report),
+            ("All Routes", "#37474f",
+             "Concise one-line summary of every route: colour, start time,\n"
+             "block count, farm count, and total volume.",
+             self._on_all_routes_report),
+            ("Route Listing", "#37474f",
+             "Comprehensive printable listing: every route with each farm\n"
+             "and processor stop listed per block.",
+             self._on_route_listing_report),
         ]:
             btn = QPushButton(label)
             btn.setFixedHeight(24)
@@ -8973,7 +8982,7 @@ class MainWindow(QMainWindow):
 
     def _on_capacity_report(self):
         """Report every block whose farm volume exceeds the 41,500 L tanker capacity."""
-        CAPACITY = 41_500
+        CAPACITY = VOL_LIMIT
         fname = self.file_cb.currentText()
         if not fname or fname not in self._cache:
             return
@@ -9027,6 +9036,210 @@ class MainWindow(QMainWindow):
 
         self._debug_text.setPlainText("\n".join(lines))
         self.tabs.setCurrentWidget(self.tabs.widget(self.tabs.count() - 1))
+
+    def _on_all_routes_report(self):
+        """One-line-per-route summary of every sheet in the Modified panel."""
+        fname = self.file_cb.currentText()
+        if not fname or fname not in self._cache:
+            return
+
+        rows = []
+        for sname in sorted(self._cache[fname].keys()):
+            entry = self._cache[fname].get(sname)
+            if not isinstance(entry, dict):
+                continue
+            colour = entry.get("day_colour", "")
+            if colour not in ("RED", "BLUE"):
+                continue
+            st = entry.get("start_time")
+            start_str = fmt_hhmm(st) if st else "--:--"
+            blocks = self._sheet_mods.get((fname, sname), entry.get("blocks", []))
+            n_blocks = len(blocks)
+            n_farms  = sum(len(b.get("rows", [])) for b in blocks)
+            vol = 0.0
+            for b in blocks:
+                for r in b.get("rows", []):
+                    try:   vol += float(r.get("prior_vol") or 0)
+                    except (TypeError, ValueError): pass
+            rows.append((sname, colour, start_str, n_blocks, n_farms, vol))
+
+        lines = ["All Routes Summary — Modified panel",
+                 f"File: {fname}",
+                 "=" * 62]
+
+        if not rows:
+            lines.append("No RED or BLUE routes found.")
+            self._debug_text.setPlainText("\n".join(lines))
+            return
+
+        # Column header
+        lines.append(
+            f"  {'Sheet':<8}  {'Colour':<6}  {'Start':<7}  "
+            f"{'Blk':>3}  {'Farms':>5}  {'Volume (L)':>12}")
+        lines.append(
+            f"  {'─'*8}  {'─'*6}  {'─'*7}  "
+            f"{'─'*3}  {'─'*5}  {'─'*12}")
+
+        red_rows  = [r for r in rows if r[1] == "RED"]
+        blue_rows = [r for r in rows if r[1] == "BLUE"]
+
+        for colour_label, group in [("RED", red_rows), ("BLUE", blue_rows)]:
+            if not group:
+                continue
+            lines.append(f"\n  ── {colour_label} ──")
+            for sname, colour, start, n_blk, n_farms, vol in group:
+                over = "  ⚠" if vol > HARD_CAP else ("  !" if vol > VOL_LIMIT else "")
+                lines.append(
+                    f"  {sname:<8}  {colour:<6}  {start:<7}  "
+                    f"{n_blk:>3}  {n_farms:>5}  {vol:>12,.0f}{over}")
+
+        # Totals
+        total_farms  = sum(r[4] for r in rows)
+        total_vol    = sum(r[5] for r in rows)
+        over_limit   = sum(1 for r in rows if r[5] > VOL_LIMIT)
+        over_hard    = sum(1 for r in rows if r[5] > HARD_CAP)
+
+        lines.append("")
+        lines.append("─" * 62)
+        lines.append(
+            f"  Routes: {len(red_rows)} RED  {len(blue_rows)} BLUE  "
+            f"({len(rows)} total)   "
+            f"Farms: {total_farms}   "
+            f"Volume: {total_vol:,.0f} L")
+        if over_limit or over_hard:
+            lines.append(
+                f"  ⚠  {over_hard} route(s) over hard cap ({HARD_CAP:,} L)   "
+                f"!  {over_limit} route(s) over soft limit ({VOL_LIMIT:,} L)")
+        lines.append(
+            f"  Avg volume/route: {total_vol/len(rows):,.0f} L   "
+            f"Avg farms/route: {total_farms/len(rows):.1f}")
+
+        self._debug_text.setPlainText("\n".join(lines))
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Debug":
+                self.tabs.setCurrentIndex(i)
+                break
+
+    def _on_route_listing_report(self):
+        """Comprehensive per-route farm and processor listing."""
+        fname = self.file_cb.currentText()
+        if not fname or fname not in self._cache:
+            return
+
+        def _vol(row):
+            try:    return float(row.get("prior_vol") or 0)
+            except: return 0.0
+
+        lines = ["Route Listing — Modified panel",
+                 f"File: {fname}",
+                 "=" * 65]
+
+        any_route = False
+        red_sheets  = []
+        blue_sheets = []
+
+        for sname in sorted(self._cache[fname].keys()):
+            entry = self._cache[fname].get(sname)
+            if not isinstance(entry, dict):
+                continue
+            colour = entry.get("day_colour", "")
+            if colour == "RED":
+                red_sheets.append((sname, entry))
+            elif colour == "BLUE":
+                blue_sheets.append((sname, entry))
+
+        for group_label, group in [("RED", red_sheets), ("BLUE", blue_sheets)]:
+            if not group:
+                continue
+            lines.append(f"\n{'─'*65}")
+            lines.append(f"  {group_label} ROUTES")
+            lines.append(f"{'─'*65}")
+
+            for sname, entry in group:
+                any_route = True
+                st = entry.get("start_time")
+                start_str = fmt_hhmm(st) if st else "--:--"
+                blocks    = self._sheet_mods.get(
+                    (fname, sname), entry.get("blocks", []))
+
+                n_farms = sum(len(b.get("rows", [])) for b in blocks)
+                vol     = sum(
+                    _vol(r)
+                    for b in blocks for r in b.get("rows", [])
+                    if r.get("prior_vol") is not None)
+
+                vol_flag = "  ⚠" if vol > HARD_CAP else ("  !" if vol > VOL_LIMIT else "")
+                lines.append(
+                    f"\n  {sname}  ·  {start_str}  ·  {len(blocks)} block(s)  "
+                    f"·  {n_farms} farms  ·  {vol:,.0f} L{vol_flag}")
+
+                for b_idx, block in enumerate(blocks):
+                    rows  = block.get("rows", [])
+                    dests = block.get("dests", [])
+                    is_preload = len(rows) == 0
+
+                    b_vol = sum(
+                        _vol(r) for r in rows
+                        if r.get("prior_vol") is not None)
+
+                    lines.append(
+                        f"\n    Block {b_idx + 1}"
+                        + (f"  [PRELOAD  {b_vol:,.0f} L]" if is_preload
+                           else f"  [{b_vol:,.0f} L]"))
+
+                    if rows:
+                        for f_idx, row in enumerate(rows):
+                            irma  = str(row.get("irma") or "").strip()
+                            ec    = row.get("_extra_cells") or {}
+                            name  = str(ec.get(18, "") or "").strip()
+                            fvol  = row.get("prior_vol")
+                            try:    fvol_str = f"{float(fvol):,.0f} L"
+                            except: fvol_str = ""
+                            m_flag = "  ★" if irma in MENNONITE_FARMS else ""
+                            name_col = f"  {name}" if name else ""
+                            lines.append(
+                                f"      {f_idx+1:>2}.  {irma:<10}{name_col:<35}"
+                                f"  {fvol_str:>10}{m_flag}")
+                    else:
+                        lines.append("      (no farms — preload block)")
+
+                    if dests:
+                        for dest in dests:
+                            key  = dest.get("key") or dest.get("dest_key") or "?"
+                            lines.append(f"      →  Processor: {key}")
+
+                lines.append("")
+
+        if not any_route:
+            lines.append("No RED or BLUE routes found.")
+
+        # Totals
+        all_sheets  = red_sheets + blue_sheets
+        total_farms = sum(
+            sum(len(b.get("rows", [])) for b in
+                self._sheet_mods.get((fname, sn), e.get("blocks", [])))
+            for sn, e in all_sheets)
+        total_vol = sum(
+            _vol(r)
+            for sn, e in all_sheets
+            for b in self._sheet_mods.get((fname, sn), e.get("blocks", []))
+            for r in b.get("rows", [])
+            if r.get("prior_vol") is not None)
+
+        lines.append("═" * 65)
+        lines.append(
+            f"  {len(red_sheets)} RED  ·  {len(blue_sheets)} BLUE  ·  "
+            f"{len(all_sheets)} routes total  ·  "
+            f"{total_farms} farms  ·  {total_vol:,.0f} L")
+        lines.append(
+            f"  ★ = Mennonite (no Sunday pickup)   "
+            f"! = over {VOL_LIMIT:,} L   ⚠ = over {HARD_CAP:,} L")
+
+        self._debug_text.setPlainText("\n".join(lines))
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Debug":
+                self.tabs.setCurrentIndex(i)
+                break
 
     def _on_changelog_report(self):
         """Compare Original vs Modified panels and report per-route farm changes."""
