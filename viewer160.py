@@ -18,7 +18,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray, QObject, QRectF, QPointF
 from PyQt5.QtGui import (QFont, QColor, QDrag, QPainter, QPen, QBrush,
-                         QTransform, QPixmap, QPainterPath)
+                         QTransform, QPixmap, QPainterPath, QTextDocument)
+from PyQt5.QtPrintSupport import QPrinter
 
 import openpyxl
 from openpyxl.styles import Font, Border, Side
@@ -471,6 +472,65 @@ def _build_block_stops(block, origin, is_last):
         s["_si"] = i
 
     return stops
+
+
+def _pdf_from_text(text, title, parent=None):
+    """Save monospace text content to a portrait A4 PDF via QPrinter."""
+    path, _ = QFileDialog.getSaveFileName(
+        parent, f"Export {title}",
+        title.replace(" ", "_").replace("/", "-") + ".pdf",
+        "PDF Files (*.pdf)")
+    if not path:
+        return
+    printer = QPrinter(QPrinter.HighResolution)
+    printer.setOutputFormat(QPrinter.PdfFormat)
+    printer.setOutputFileName(path)
+    printer.setPageSize(QPrinter.A4)
+    printer.setOrientation(QPrinter.Portrait)
+    doc = QTextDocument()
+    doc.setDefaultFont(QFont("Courier New", 7))
+    doc.setPlainText(text)
+    doc.print_(printer)
+
+
+def _pdf_from_widget(widget, title, parent=None, landscape=True):
+    """Render a QWidget directly to a landscape (default) A4 PDF at printer resolution."""
+    path, _ = QFileDialog.getSaveFileName(
+        parent, f"Export {title}",
+        title.replace(" ", "_").replace("/", "-") + ".pdf",
+        "PDF Files (*.pdf)")
+    if not path:
+        return
+
+    printer = QPrinter(QPrinter.HighResolution)
+    printer.setOutputFormat(QPrinter.PdfFormat)
+    printer.setOutputFileName(path)
+    printer.setPageSize(QPrinter.A4)
+    printer.setOrientation(
+        QPrinter.Landscape if landscape else QPrinter.Portrait)
+
+    painter = QPainter(printer)
+    page    = painter.viewport()
+
+    # Use the widget's full content size (minimumSize captures the full canvas
+    # even if parts are scrolled out of view in the parent scroll area)
+    ww = max(widget.minimumWidth(),  widget.width(),  100)
+    wh = max(widget.minimumHeight(), widget.height(), 100)
+
+    # Scale to fit page, preserving aspect ratio, centred
+    s  = min(page.width() / ww, page.height() / wh)
+    ox = (page.width()  - ww * s) / 2
+    oy = (page.height() - wh * s) / 2
+
+    # White background
+    painter.fillRect(page, Qt.white)
+    painter.translate(ox, oy)
+    painter.scale(s, s)
+
+    # Render widget directly to printer painter (vector, no pixmap intermediary)
+    widget.render(painter, flags=QWidget.DrawChildren)
+    painter.end()
+
 
 
 def _route_stop_segments(blocks, all_times, start_mins):
@@ -6029,6 +6089,15 @@ class TruckAvailDialog(QDialog):
 
         close_row = QHBoxLayout()
         close_row.addStretch()
+        pdf_btn = QPushButton("Export PDF")
+        pdf_btn.setStyleSheet(
+            "QPushButton{background:#4a148c;color:white;font-weight:bold;"
+            "border-radius:3px;padding:0 10px;}")
+        pdf_btn.setToolTip("Export the truck availability timeline to a landscape A4 PDF.")
+        pdf_btn.clicked.connect(lambda: _pdf_from_widget(
+            self._scroll.widget(), "Truck_Availability_Timeline",
+            parent=self, landscape=True))
+        close_row.addWidget(pdf_btn)
         btn = QPushButton("Close")
         btn.clicked.connect(self.close)
         close_row.addWidget(btn)
@@ -6185,6 +6254,14 @@ class ProcessorScheduleDialog(QDialog):
 
         close_row = QHBoxLayout()
         close_row.addStretch()
+        pdf_btn = QPushButton("Export PDF")
+        pdf_btn.setStyleSheet(
+            "QPushButton{background:#4a148c;color:white;font-weight:bold;"
+            "border-radius:3px;padding:0 10px;}")
+        pdf_btn.setToolTip("Export the processor schedule to a landscape A4 PDF.")
+        pdf_btn.clicked.connect(lambda: _pdf_from_widget(
+            self._chart, "Processor_Schedule", parent=self, landscape=True))
+        close_row.addWidget(pdf_btn)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         close_row.addWidget(close_btn)
@@ -7913,11 +7990,26 @@ class MainWindow(QMainWindow):
         copy_btn.clicked.connect(self._copy_debug_text)
         hrl.addWidget(copy_btn)
 
+        pdf_btn = QPushButton("Export PDF")
+        pdf_btn.setFixedHeight(24)
+        pdf_btn.setStyleSheet(
+            "QPushButton { background:#4a148c; color:white; font-weight:bold; "
+            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
+        pdf_btn.setToolTip("Export the current report to a print-ready PDF.")
+        pdf_btn.clicked.connect(self._on_export_debug_pdf)
+        hrl.addWidget(pdf_btn)
+
         dl.addWidget(hdr_row)
 
-        # -- Tools row - suppress milking --------------------------------------
-        tools_row = QWidget()
-        trl = QHBoxLayout(tools_row); trl.setContentsMargins(0,0,0,0); trl.setSpacing(8)
+        # -- Tools: two rows of buttons ----------------------------------------
+        tools_widget = QWidget()
+        tools_vl = QVBoxLayout(tools_widget)
+        tools_vl.setContentsMargins(0, 0, 0, 0)
+        tools_vl.setSpacing(4)
+
+        # ── Row 1: checkboxes + text reports ──────────────────────────────────
+        row1 = QWidget()
+        trl  = QHBoxLayout(row1); trl.setContentsMargins(0,0,0,0); trl.setSpacing(6)
 
         self._suppress_no_milking_cb = QCheckBox(
             "Suppress milking windows for 37-874, 14-247, 92-545")
@@ -7941,87 +8033,81 @@ class MainWindow(QMainWindow):
             "Uncheck to fully revert Modified to match Original.")
         self._chk_route_opt.stateChanged.connect(self._on_route_opt_changed)
         trl.addWidget(self._chk_route_opt)
-        # Aliases so existing code references still work
         self._chk_auto_flag = self._chk_route_opt
         self._chk_split_opt = self._chk_route_opt
 
-        plant_win_btn = QPushButton("Plant Window Cost Report")
-        plant_win_btn.setFixedHeight(24)
-        plant_win_btn.setStyleSheet(
-            "QPushButton { background:#6a1b9a; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
-        plant_win_btn.setToolTip(
-            "For every route in the Modified panel, show the plant window penalty\n"
-            "per processor destination - grouped by processor across all routes.")
-        plant_win_btn.clicked.connect(self._on_plant_window_report)
-        trl.addWidget(plant_win_btn)
-
-        cost_report_btn = QPushButton("Full Cost Report")
-        cost_report_btn.setFixedHeight(24)
-        cost_report_btn.setStyleSheet(
-            "QPushButton { background:#1565c0; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
-        cost_report_btn.setToolTip(
-            "Show complete cost breakdown for every route in the Modified panel:\n"
-            "km, milking waits, shift, overtime, cap, plant window, per-block.")
-        cost_report_btn.clicked.connect(self._on_full_cost_report)
-        trl.addWidget(cost_report_btn)
-
-        proc_sched_btn = QPushButton("Processor Schedule")
-        proc_sched_btn.setFixedHeight(24)
-        proc_sched_btn.setStyleSheet(
-            "QPushButton { background:#00695c; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
-        proc_sched_btn.setToolTip(
-            "Visual chart: every truck's arrival-to-departure time at every\n"
-            "processor across the loaded file, on one shared time axis.\n"
-            "Highlights overlapping trucks at the same dock and shows any\n"
-            "configured avoid-windows.")
-        proc_sched_btn.clicked.connect(self._on_processor_schedule)
-        trl.addWidget(proc_sched_btn)
-
-        overtime_btn = QPushButton("Overtime Timeline")
-        overtime_btn.setFixedHeight(24)
-        overtime_btn.setStyleSheet(
-            "QPushButton { background:#c62828; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
-        overtime_btn.setToolTip(
-            "For every route in the Modified panel that has overtime,\n"
-            "show a stop-by-stop timeline: arrival, wait reason, departure,\n"
-            "cumulative shift time. Diagnose gate waits vs milking vs distance.")
-        overtime_btn.clicked.connect(self._on_overtime_timeline)
-        trl.addWidget(overtime_btn)
-
-        intra_btn = QPushButton("Intra-Route Savings")
-        intra_btn.setFixedHeight(24)
-        intra_btn.setStyleSheet(
-            "QPushButton { background:#00695c; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
-        intra_btn.setToolTip(
-            "Exhaustively reorder farms within each route (2-opt until convergence)\n"
-            "and report km and hours saved vs current Modified panel.\n"
-            "Shows upper bound of what pure within-route reordering can achieve.")
-        intra_btn.clicked.connect(self._on_intra_route_savings)
-        trl.addWidget(intra_btn)
-
-        block_cap_btn = QPushButton("Block Capacity Distribution")
-        block_cap_btn.setFixedHeight(24)
-        block_cap_btn.setStyleSheet(
-            "QPushButton { background:#e65100; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; padding: 0 8px; }")
-        block_cap_btn.setToolTip(
-            "For every non-preload block in the Modified panel, compute peak load\n"
-            "(matching the cap-penalty logic exactly: total farm vol for simple blocks,\n"
-            "running peak through the stop sequence for split blocks).\n\n"
-            "Reports: summary statistics, percentiles, histogram, threshold-sensitivity\n"
-            "table, top-N heaviest blocks, and per-route maxima.\n\n"
-            "Use this to choose hard_vol_cap from data, and to spot solver gaming\n"
-            "(loads piling against the threshold rather than spread naturally).")
-        block_cap_btn.clicked.connect(self._on_block_capacity_distribution)
-        trl.addWidget(block_cap_btn)
-
+        for label, style, tip, slot in [
+            ("Plant Window Cost Report", "#6a1b9a",
+             "For every route in the Modified panel, show the plant window penalty\n"
+             "per processor destination - grouped by processor across all routes.",
+             self._on_plant_window_report),
+            ("Full Cost Report", "#1565c0",
+             "Show complete cost breakdown for every route in the Modified panel:\n"
+             "km, milking waits, shift, overtime, cap, plant window, per-block.",
+             self._on_full_cost_report),
+            ("Capacity Report", "#e65100",
+             "List every route block whose total farm volume exceeds 41,500 L.\n"
+             "Shows block-by-block volumes and how far over capacity each is.",
+             self._on_capacity_report),
+            ("Changelog", "#00695c",
+             "Show which farms were added, removed, or moved between\n"
+             "the Original and Modified panels for each route.",
+             self._on_changelog_report),
+        ]:
+            btn = QPushButton(label)
+            btn.setFixedHeight(24)
+            btn.setStyleSheet(
+                f"QPushButton {{ background:{style}; color:white; font-weight:bold; "
+                f"border-radius:3px; font-size:8pt; padding: 0 8px; }}")
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            trl.addWidget(btn)
         trl.addStretch()
-        dl.addWidget(tools_row)
+        tools_vl.addWidget(row1)
+
+        # ── Row 2: visual / analysis tools ────────────────────────────────────
+        row2 = QWidget()
+        tr2  = QHBoxLayout(row2); tr2.setContentsMargins(0,0,0,0); tr2.setSpacing(6)
+
+        for label, style, tip, slot in [
+            ("Processor Schedule", "#00695c",
+             "Visual chart: every truck's arrival-to-departure time at every\n"
+             "processor across the loaded file, on one shared time axis.\n"
+             "Highlights overlapping trucks at the same dock and shows any\n"
+             "configured avoid-windows.",
+             self._on_processor_schedule),
+            ("Overtime Timeline", "#c62828",
+             "For every route in the Modified panel that has overtime,\n"
+             "show a stop-by-stop timeline: arrival, wait reason, departure,\n"
+             "cumulative shift time. Diagnose gate waits vs milking vs distance.",
+             self._on_overtime_timeline),
+            ("Intra-Route Savings", "#00695c",
+             "Exhaustively reorder farms within each route (2-opt until convergence)\n"
+             "and report km and hours saved vs current Modified panel.\n"
+             "Shows upper bound of what pure within-route reordering can achieve.",
+             self._on_intra_route_savings),
+            ("Block Capacity Distribution", "#e65100",
+             "For every non-preload block in the Modified panel, compute peak load\n"
+             "(matching the cap-penalty logic exactly: total farm vol for simple blocks,\n"
+             "running peak through the stop sequence for split blocks).\n\n"
+             "Reports: summary statistics, percentiles, histogram, threshold-sensitivity\n"
+             "table, top-N heaviest blocks, and per-route maxima.\n\n"
+             "Use this to choose hard_vol_cap from data, and to spot solver gaming\n"
+             "(loads piling against the threshold rather than spread naturally).",
+             self._on_block_capacity_distribution),
+        ]:
+            btn = QPushButton(label)
+            btn.setFixedHeight(24)
+            btn.setStyleSheet(
+                f"QPushButton {{ background:{style}; color:white; font-weight:bold; "
+                f"border-radius:3px; font-size:8pt; padding: 0 8px; }}")
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            tr2.addWidget(btn)
+        tr2.addStretch()
+        tools_vl.addWidget(row2)
+
+        dl.addWidget(tools_widget)
 
         # Info strip
         self._debug_info = QLabel("")
@@ -8306,7 +8392,9 @@ class MainWindow(QMainWindow):
             "vol_tol":               self._sw_vol_tol.value(),
             "vol_penalty":           self._sw_vol_pen.value(),
         }
-        lines = ["Full Cost Report - Modified panel", "=" * 70]
+        lines = [f"Full Cost Report - Modified panel",
+                 f"File: {fname}",
+                 "=" * 70]
         grand = {k: 0.0 for k in ("km","milking","shift","overtime","cap","plant_win","total")}
 
         for sname in sorted(self._cache[fname].keys()):
@@ -8770,7 +8858,9 @@ class MainWindow(QMainWindow):
         }
         max_sh  = cfg["max_shift_h"]
         suppress = cfg["suppress_no_milking"]
-        lines = ["Overtime Timeline - Modified panel", "=" * 70]
+        lines = [f"Overtime Timeline - Modified panel",
+                 f"File: {fname}",
+                 "=" * 70]
         n_overtime = 0
 
         for sname in sorted(self._cache[fname].keys()):
@@ -8881,6 +8971,190 @@ class MainWindow(QMainWindow):
             lines.append(f"Total routes with overtime: {n_overtime}")
         self._debug_text.setPlainText("\n".join(lines))
 
+    def _on_capacity_report(self):
+        """Report every block whose farm volume exceeds the 41,500 L tanker capacity."""
+        CAPACITY = 41_500
+        fname = self.file_cb.currentText()
+        if not fname or fname not in self._cache:
+            return
+
+        lines      = [f"Capacity Report  (limit: {CAPACITY:,} L) — Modified panel",
+                      f"File: {fname}",
+                      "=" * 65]
+        over_count = 0
+        ok_count   = 0
+
+        for sname in sorted(self._cache[fname].keys()):
+            entry = self._cache[fname].get(sname)
+            if not isinstance(entry, dict):
+                continue
+            blocks = self._sheet_mods.get((fname, sname),
+                                          entry.get("blocks", []))
+            sheet_header_written = False
+
+            for b_idx, block in enumerate(blocks):
+                # Sum prior_vol for all farm rows in this block
+                block_vol = 0.0
+                for row in block.get("rows", []):
+                    try:
+                        block_vol += float(row.get("prior_vol") or 0)
+                    except (TypeError, ValueError):
+                        pass
+
+                if block_vol > CAPACITY:
+                    over_count += 1
+                    if not sheet_header_written:
+                        colour = entry.get("day_colour", "")
+                        lines.append(f"\n{sname}  [{colour}]")
+                        sheet_header_written = True
+                    over_by = block_vol - CAPACITY
+                    farms_n = len(block.get("rows", []))
+                    lines.append(
+                        f"  Block {b_idx + 1:>2}:  {block_vol:>8,.0f} L  "
+                        f"(+{over_by:,.0f} L over,  {farms_n} farms)"
+                    )
+                else:
+                    ok_count += 1
+
+        lines.append("")
+        lines.append("─" * 65)
+        if over_count == 0:
+            lines.append(f"✓  All {ok_count} blocks are within capacity ({CAPACITY:,} L).")
+        else:
+            lines.append(
+                f"⚠  {over_count} block{'s' if over_count != 1 else ''} over capacity  |  "
+                f"{ok_count} within capacity.")
+
+        self._debug_text.setPlainText("\n".join(lines))
+        self.tabs.setCurrentWidget(self.tabs.widget(self.tabs.count() - 1))
+
+    def _on_changelog_report(self):
+        """Compare Original vs Modified panels and report per-route farm changes."""
+        fname = self.file_cb.currentText()
+        if not fname or fname not in self._cache:
+            return
+
+        # ── Build original and modified farm location maps ────────────────────
+        # {irma: [(sname, block_idx, row_idx)]}
+        orig_locs = {}
+        mod_locs  = {}
+        irma_names = {}   # {irma: name}
+
+        for sname, entry in self._cache[fname].items():
+            if not isinstance(entry, dict):
+                continue
+            orig_blocks = entry.get("blocks", [])
+            mod_blocks  = self._sheet_mods.get((fname, sname), orig_blocks)
+
+            for b_idx, block in enumerate(orig_blocks):
+                for f_idx, row in enumerate(block.get("rows", [])):
+                    irma = str(row.get("irma") or "").strip()
+                    if irma:
+                        orig_locs.setdefault(irma, []).append((sname, b_idx, f_idx))
+                        if irma not in irma_names:
+                            ec   = row.get("_extra_cells") or {}
+                            name = str(ec.get(18, "") or "").strip()
+                            if name:
+                                irma_names[irma] = name
+
+            for b_idx, block in enumerate(mod_blocks):
+                for f_idx, row in enumerate(block.get("rows", [])):
+                    irma = str(row.get("irma") or "").strip()
+                    if irma:
+                        mod_locs.setdefault(irma, []).append((sname, b_idx, f_idx))
+                        if irma not in irma_names:
+                            ec   = row.get("_extra_cells") or {}
+                            name = str(ec.get(18, "") or "").strip()
+                            if name:
+                                irma_names[irma] = name
+
+        # ── Diff ──────────────────────────────────────────────────────────────
+        # changes[sname] = {"added": [...], "removed": [...], "moved": [...]}
+        changes = {}
+
+        def _entry(sname):
+            changes.setdefault(sname, {"added": [], "removed": [], "moved": []})
+            return changes[sname]
+
+        def _fmt(irma):
+            name = irma_names.get(irma, "")
+            return f"{irma}  {name}" if name else irma
+
+        all_irmas = sorted(set(orig_locs) | set(mod_locs))
+
+        for irma in all_irmas:
+            orig = orig_locs.get(irma, [])
+            mod  = mod_locs.get(irma,  [])
+            orig_sheets = {s for s, _, _ in orig}
+            mod_sheets  = {s for s, _, _ in mod}
+
+            # Removed entirely from a sheet
+            for sname in orig_sheets - mod_sheets:
+                if mod_sheets:
+                    dest = next(iter(mod_sheets))
+                    _entry(sname)["removed"].append(f"{_fmt(irma)}  → moved to {dest}")
+                else:
+                    _entry(sname)["removed"].append(_fmt(irma))
+
+            # Added to a sheet
+            for sname in mod_sheets - orig_sheets:
+                if orig_sheets:
+                    src = next(iter(orig_sheets))
+                    _entry(sname)["added"].append(f"{_fmt(irma)}  ← from {src}")
+                else:
+                    _entry(sname)["added"].append(_fmt(irma))
+
+            # Same sheet — check if block or position changed
+            for sname in orig_sheets & mod_sheets:
+                op = [(b, f) for s, b, f in orig if s == sname]
+                mp = [(b, f) for s, b, f in mod  if s == sname]
+                if op and mp and op != mp:
+                    ob, of_ = op[0];  mb, mf = mp[0]
+                    desc = (f"{_fmt(irma)}  "
+                            f"block {ob+1} position {of_+1} → block {mb+1} position {mf+1}")
+                    _entry(sname)["moved"].append(desc)
+
+        # ── Render ────────────────────────────────────────────────────────────
+        lines = ["Route Changelog — Original vs Modified",
+                 f"File: {fname}",
+                 "=" * 65]
+        total_a = total_r = total_m = 0
+        any_change = False
+
+        for sname in sorted(changes.keys()):
+            c = changes[sname]
+            if not (c["removed"] or c["added"] or c["moved"]):
+                continue
+            any_change = True
+            entry  = self._cache[fname].get(sname, {})
+            colour = entry.get("day_colour", "") if isinstance(entry, dict) else ""
+            lines.append(f"\n{sname}  [{colour}]")
+
+            for desc in sorted(c["removed"]):
+                lines.append(f"  -  {desc}")
+                total_r += 1
+            for desc in sorted(c["added"]):
+                lines.append(f"  +  {desc}")
+                total_a += 1
+            for desc in sorted(c["moved"]):
+                lines.append(f"  ↕  {desc}")
+                total_m += 1
+
+        lines.append("")
+        lines.append("─" * 65)
+        if not any_change:
+            lines.append("No changes detected — Modified matches Original.")
+        else:
+            lines.append(
+                f"Total:  +{total_a} added   -{total_r} removed   "
+                f"↕{total_m} reordered")
+
+        self._debug_text.setPlainText("\n".join(lines))
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Debug":
+                self.tabs.setCurrentIndex(i)
+                break
+
     def _on_plant_window_report(self):
         """Output per-processor, per-route plant window costs to the debug text area."""
         fname = self.file_cb.currentText()
@@ -8973,7 +9247,9 @@ class MainWindow(QMainWindow):
                                 status = f"margin  {mins_to_close:.0f}m to close  pen={pen:.1f}"
                     dest_report[dk].append((sname, b_idx+1, arr_s, pen, status))
 
-        lines       = ["Plant Window Cost Report - Modified panel", "=" * 60]
+        lines       = [f"Plant Window Cost Report - Modified panel",
+                       f"File: {fname}",
+                       "=" * 60]
         grand_total = 0.0
         for dk in sorted(dest_report.keys()):
             entries    = dest_report[dk]
@@ -9121,6 +9397,17 @@ class MainWindow(QMainWindow):
             f"Sheet {sname} - {len(blocks)} block(s), {total_farms} farm(s)  "
             f"| dm keys: {len(self.dm)}  dur keys: {len(self.dm_dur)}"
         )
+
+    def _on_export_debug_pdf(self):
+        """Export the current Debug tab text to a print-ready PDF."""
+        text = self._debug_text.toPlainText().strip()
+        if not text:
+            QMessageBox.information(self, "Export PDF",
+                                    "Nothing to export — run a report first.")
+            return
+        # Use first line as title
+        title = text.split("\n")[0][:60].strip() or "Report"
+        _pdf_from_text(text, title, parent=self)
 
     def _copy_debug_text(self):
         from PyQt5.QtWidgets import QApplication as _QApp
