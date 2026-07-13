@@ -1,7 +1,9 @@
 
-current ver: viewer215
+current ver: viewer216 
 
 ver history
+
+216: optimizations
 
 215: added more reports
 
