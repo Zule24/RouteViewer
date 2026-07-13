@@ -2,7 +2,9 @@
 viewer.py  -  Vedder D100 Route Manager
 """
 
-import re, sys, csv, copy, random, math, time, uuid, logging
+import re, sys, csv, copy, random, math, uuid, logging
+from functools import lru_cache
+from collections import defaultdict
 from pathlib import Path
 from datetime import time as dt_time, datetime, date, timedelta
 
@@ -10,13 +12,13 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem,
     QFrame, QHeaderView, QAbstractItemView, QTabWidget, QSplitter,
-    QScrollBar, QScrollArea, QDoubleSpinBox, QSpinBox, QProgressBar,
-    QGroupBox, QCheckBox, QTextEdit, QSizePolicy, QDialog,
+    QScrollArea, QDoubleSpinBox, QSpinBox, QProgressBar,
+    QGroupBox, QCheckBox, QTextEdit, QDialog,
     QLineEdit, QMessageBox, QFileDialog, QToolTip, QButtonGroup,
     QGraphicsScene, QGraphicsView, QGraphicsEllipseItem,
-    QGraphicsRectItem, QGraphicsPixmapItem, QGraphicsTextItem, QDialogButtonBox
+    QGraphicsRectItem, QGraphicsTextItem, QDialogButtonBox
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray, QObject, QRectF, QPointF
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray, QObject, QRectF
 from PyQt5.QtGui import (QFont, QColor, QDrag, QPainter, QPen, QBrush,
                          QTransform, QPixmap, QPainterPath, QTextDocument)
 from PyQt5.QtPrintSupport import QPrinter
@@ -282,7 +284,19 @@ def month_key(name):
 
 # -- Milking window conflict --------------------------------------------------
 
+@lru_cache(maxsize=4096)
+def _parse_hhmm_cached(s):
+    return _parse_hhmm_impl(s)
+
 def parse_hhmm(s):
+    """Cached front-end for _parse_hhmm_impl (hot path: millions of calls
+    per solve on a small set of distinct window strings)."""
+    try:
+        return _parse_hhmm_cached(s)
+    except TypeError:          # unhashable input - fall back uncached
+        return _parse_hhmm_impl(s)
+
+def _parse_hhmm_impl(s):
     """Parse 'HH:MM' string -> datetime.time, or return None.
 
     Also accepts:
@@ -340,6 +354,7 @@ def arrives_during_milking(arr_time, row_data, suppress_no_milking=True):
 
 # -- Distance matrix -----------------------------------------------------------
 
+@lru_cache(maxsize=None)
 def normalise_key(k):
     s = str(k).strip()
     if s.endswith(".0") and s[:-2].lstrip("-").isdigit(): s = s[:-2]
@@ -370,6 +385,11 @@ def load_distance_matrix(path):
     return dm
 
 def lookup(dm, a, b):
+    # Fast path: solver-state keys are already normalised, so try the raw pair
+    # first and only pay for normalise_key on a miss (raw Excel values etc.).
+    key = (a, b)
+    if key in dm:
+        return dm[key]
     return dm.get((normalise_key(a), normalise_key(b)))
 
 def _block_dest_keys(block):
@@ -444,7 +464,6 @@ def _build_block_stops(block, origin, is_last):
 
     # Group dests by their split_after index.
     # split_after=None means after all farms (index = len(farms)).
-    from collections import defaultdict
     dests_by_split = defaultdict(list)
     for d in dests:
         sa = d.get("split_after")
@@ -1313,10 +1332,6 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         if not dests:
             dk = block.get("dest_key",""); dn = block.get("dest_name","") or dk or "Destination"
             dests = [{"name": dn, "key": dk, "vol_partial": None}] if dk else []
-        # legacy compat
-        dest_key  = dests[0]["key"]  if dests else ""
-        dest_name = dests[0]["name"] if dests else "Destination"
-
         route_dist = 0.0; route_ok = True
         for d in dists[:-1]:
             if d is None: route_ok = False
@@ -2518,8 +2533,16 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
                 btimes = all_times[b_idx] if b_idx < len(all_times) else None
                 if not btimes:
                     continue
+                # Build the stop sequence once per block instead of once per
+                # farm (_farm_stop_index rebuilds it internally) - identical
+                # indices, ~len(rows)x fewer _build_block_stops calls.
+                _is_last_b = (b_idx == len(blocks) - 1)
+                _origin_b  = "VEDDER" if b_idx == 0 else (
+                    _block_last_dest_key(blocks[b_idx - 1]) or "VEDDER")
+                _stops_b   = _build_block_stops(block, _origin_b, _is_last_b)
+                _farm_sis  = [s["_si"] for s in _stops_b if s["type"] == "farm"]
                 for f_i, farm in enumerate(block["rows"]):
-                    f_stop = _farm_stop_index(block, f_i, b_idx, blocks)
+                    f_stop = _farm_sis[f_i] if f_i < len(_farm_sis) else f_i + 1
                     ft = btimes[f_stop] if f_stop < len(btimes) else None
                     if ft is None or ft["arr"] is None:
                         continue
@@ -2687,7 +2710,6 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
             if not dests3:
                 dk3 = block3.get("dest_key", "")
                 dests3 = [{"key": dk3}] if dk3 else []
-            n_farms3 = len(block3["rows"])
             for d_i3, dest_d3 in enumerate(dests3):
                 # Yard-for destinations are overnight parking - no receiving window
                 if "yard for" in (dest_d3.get("name","") or "").lower():
@@ -3001,6 +3023,32 @@ def _group_vol_penalty(state, orig_dest_vols, cfg):
     return pen
 
 
+
+def _copy_blocks(blocks):
+    """Fast structural copy of a list of block dicts for solver states.
+
+    Copies each block dict, its rows list, and its dest dicts, but SHARES the
+    individual row (farm) dicts.  Rows are treated as immutable during solving:
+    operators move rows between lists or insert fresh dict() copies, and never
+    edit a row's fields in place (T1/T2 volume folding mutates copies before
+    the loop; the post-solve restore writes back original values).  Dest dicts
+    ARE copied because _optimize_split_positions mutates "split_after" in
+    place mid-loop.  This is much faster than copy.deepcopy on large states.
+    """
+    out = []
+    for b in blocks:
+        nb = dict(b)
+        nb["rows"]  = list(b.get("rows") or [])
+        nb["dests"] = [dict(d) for d in (b.get("dests") or [])]
+        out.append(nb)
+    return out
+
+
+def _copy_state(state):
+    """Structural copy of an entire solver state (see _copy_blocks)."""
+    return [(sn, _copy_blocks(blocks)) for sn, blocks in state]
+
+
 def _group_sheets_by_colour(cache, fname):
     """Return {"RED": [(sname, entry), ...], "BLUE": [...]} for the loaded file."""
     groups = {"RED": [], "BLUE": []}
@@ -3040,7 +3088,7 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
     Returns a string summary (multi-line) to be appended to the solver log.
     """
     try:
-        from scipy.optimize import linprog, milp, LinearConstraint, Bounds
+        from scipy.optimize import milp, LinearConstraint, Bounds  # noqa: F401 (availability probe)
         import numpy as np
     except ImportError:
         return "  [HiGHS check] scipy not available - skipping verification."
@@ -3104,7 +3152,6 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
     # We use the same units as _sheet_cost (km-equivalent).
     # Shift penalty and cap penalty encoded as additive per-assignment costs.
     vol_tol      = cfg.get("vol_tol", 0.15)
-    vol_pen_rate = cfg.get("vol_penalty", 1.0)
     hard_cap     = cfg.get("hard_vol_cap", HARD_CAP)
     cap_pen_rate = cfg.get("cap_penalty", 2.0)
 
@@ -3122,9 +3169,6 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
 
     # -- integrality: all binary -----------------------------------------------
     integrality = [1] * (n_routes * n_procs)  # 1 = integer
-
-    # -- bounds: 0 ≤ x ≤ 1 ----------------------------------------------------
-    bounds = Bounds(lb=0.0, ub=1.0)
 
     # -- equality constraint: each route assigned to exactly one processor -----
     # sum_j x[i,j] = 1  for each i
@@ -3154,9 +3198,6 @@ def _highs_verify_processor_assignment(colour, sheets, state, dm, cfg, log_fn):
         # lower bound (negate)
         row_lo = [-x for x in row_hi]
         A_ineq_rows.append(row_lo); b_ineq.append(-lo)
-
-    import numpy as np
-    from scipy.optimize import milp, LinearConstraint, Bounds
 
     c_arr     = np.array(c, dtype=float)
     bounds_   = Bounds(lb=0.0, ub=1.0)
@@ -3675,7 +3716,7 @@ class ALNSSolver(QThread):
                 for f_idx in range(len(block["rows"])):
                     flat.append((s_idx, b_idx, f_idx))
         if not flat:
-            return copy.deepcopy(state), []
+            return _copy_state(state), []
         n_remove = min(n_remove, len(flat))
         chosen   = set(map(tuple, random.sample(flat, n_remove)))
 
@@ -3687,9 +3728,9 @@ class ALNSSolver(QThread):
                 keep = []
                 for f_idx, farm in enumerate(block["rows"]):
                     if (s_idx, b_idx, f_idx) in chosen:
-                        removed.append((s_idx, b_idx, copy.deepcopy(farm)))
+                        removed.append((s_idx, b_idx, dict(farm)))
                     else:
-                        keep.append(copy.deepcopy(farm))
+                        keep.append(dict(farm))
                 new_blocks.append(dict(block, rows=keep))
             new_state.append((sname, new_blocks))
         return new_state, removed
@@ -3708,7 +3749,7 @@ class ALNSSolver(QThread):
                 if _is_fixed_vol_block(block):
                     continue   # frozen - explicit vol_partial on every dest
                 for f_idx in range(len(block["rows"])):
-                    trial = copy.deepcopy(blocks)
+                    trial = _copy_blocks(blocks)
                     trial[b_idx]["rows"].pop(f_idx)
                     new_c = _sheet_cost(trial, self.dm, st, self.cfg, dm_dur=self.dm_dur)
                     savings.append((base - new_c, s_idx, b_idx, f_idx))
@@ -3724,7 +3765,7 @@ class ALNSSolver(QThread):
                 break
 
         # Now deepcopy state and remove by index (high-to-low to preserve indices)
-        new_state = copy.deepcopy(state)
+        new_state = _copy_state(state)
         removed   = []
         for (s_idx, b_idx), idxs in seen.items():
             block = new_state[s_idx][1][b_idx]
@@ -3775,7 +3816,7 @@ class ALNSSolver(QThread):
         cost) so hard-to-place farms claim their preferred slot before easier
         ones, reducing cascades of suboptimal placements.
         """
-        state = copy.deepcopy(state)
+        state = _copy_state(state)
         # Per-sheet start times. None -> no start time -> sheet is frozen.
         start_map = {}
         for sname, blocks in state:
@@ -3801,14 +3842,28 @@ class ALNSSolver(QThread):
             for _, sname, blocks in eligible
         }
 
+        # (farm, sheet, generation) memo - see _repair_regret for rationale.
+        # Results computed during the _min_cost ordering pass are reused by
+        # the insertion loop below for every sheet not modified in between.
+        sheet_gen   = {sname: 0 for sname, _ in state}
+        insert_memo = {}
+
+        def _memo_insert_cost(farm, sname, blocks):
+            mkey = (id(farm), sname, sheet_gen[sname])
+            res  = insert_memo.get(mkey)
+            if res is None:
+                res = self._best_insert_cost(blocks, farm, self.dm,
+                                             shift_start=start_map[sname],
+                                             baseline=baseline_cache[sname],
+                                             dm_dur=self.dm_dur)
+                insert_memo[mkey] = res
+            return res
+
         def _min_cost(item):
             _, _, farm = item
             best_c = float("inf")
             for _, sname, blocks in eligible:
-                b, pos, c = self._best_insert_cost(blocks, farm, self.dm,
-                                                    shift_start=start_map[sname],
-                                                    baseline=baseline_cache[sname],
-                                                    dm_dur=self.dm_dur)
+                b, pos, c = _memo_insert_cost(farm, sname, blocks)
                 if b is not None and c < best_c:
                     best_c = c
             return best_c
@@ -3826,19 +3881,17 @@ class ALNSSolver(QThread):
             else:
                 candidates = eligible
             for s_idx, sname, blocks in candidates:
-                b_idx, pos, c = self._best_insert_cost(blocks, farm, self.dm,
-                                                        shift_start=start_map[sname],
-                                                        baseline=baseline_cache[sname],
-                                                        dm_dur=self.dm_dur)
+                b_idx, pos, c = _memo_insert_cost(farm, sname, blocks)
                 if b_idx is not None and c < best_c:
                     best_s, best_b, best_pos, best_c = s_idx, b_idx, pos, c
             if best_s is not None:
                 if best_s != s_hint:
                     cross_route += 1
-                state[best_s][1][best_b]["rows"].insert(best_pos, copy.deepcopy(farm))
-                # Invalidate baseline for the modified sheet so subsequent farms
-                # on the same sheet see the updated cost.
+                state[best_s][1][best_b]["rows"].insert(best_pos, dict(farm))
+                # Invalidate baseline and memoised insertions for the modified
+                # sheet so subsequent farms see the updated cost.
                 sname_mod = state[best_s][0]
+                sheet_gen[sname_mod] += 1
                 baseline_cache[sname_mod] = _sheet_cost(
                     state[best_s][1], self.dm, start_map[sname_mod], self.cfg,
                     dm_dur=self.dm_dur)
@@ -3849,7 +3902,7 @@ class ALNSSolver(QThread):
 
         Sheets with no start_time are frozen and excluded from candidate slots.
         """
-        state   = copy.deepcopy(state)
+        state   = _copy_state(state)
         pending = list(removed)
         # Per-sheet start times. None -> frozen.
         start_map = {}
@@ -3872,6 +3925,15 @@ class ALNSSolver(QThread):
             if s_idx in eligible_idxs
         }
 
+        # (farm, sheet, generation) -> _best_insert_cost result.  A sheet's
+        # generation bumps only when a farm is inserted into it, so results
+        # for untouched sheets are reused verbatim across regret rounds
+        # instead of being recomputed (they are deterministic and identical).
+        # Keyed by id(farm): farm dicts are pinned by the caller's `removed`
+        # list for the lifetime of this memo, so ids are stable and unique here.
+        sheet_gen   = {sname: 0 for sname, _ in state}
+        insert_memo = {}
+
         cross_route = 0
         while pending:
             best_farm_i = None
@@ -3889,10 +3951,15 @@ class ALNSSolver(QThread):
                 for s_idx, (sname, blocks) in enumerate(state):
                     if s_idx not in allowed:
                         continue   # sheet has no start time or wrong shift class - frozen
-                    b_idx, pos, c = self._best_insert_cost(blocks, farm, self.dm,
-                                                            shift_start=start_map[sname],
-                                                            baseline=baseline_cache[sname],
-                                                            dm_dur=self.dm_dur)
+                    mkey = (id(farm), sname, sheet_gen[sname])
+                    res  = insert_memo.get(mkey)
+                    if res is None:
+                        res = self._best_insert_cost(blocks, farm, self.dm,
+                                                     shift_start=start_map[sname],
+                                                     baseline=baseline_cache[sname],
+                                                     dm_dur=self.dm_dur)
+                        insert_memo[mkey] = res
+                    b_idx, pos, c = res
                     if b_idx is not None:
                         slot_costs.append((c, s_idx, b_idx, pos))
                 slot_costs.sort()
@@ -3909,9 +3976,10 @@ class ALNSSolver(QThread):
             s_hint, b_hint, farm = pending.pop(best_farm_i)
             if s_idx != s_hint:
                 cross_route += 1
-            state[s_idx][1][b_idx]["rows"].insert(pos, copy.deepcopy(farm))
-            # Invalidate baseline for the modified sheet
+            state[s_idx][1][b_idx]["rows"].insert(pos, dict(farm))
+            # Invalidate baseline and memoised insertions for the modified sheet
             sname_mod = state[s_idx][0]
+            sheet_gen[sname_mod] += 1
             baseline_cache[sname_mod] = _sheet_cost(
                 state[s_idx][1], self.dm, start_map[sname_mod], self.cfg,
                 dm_dur=self.dm_dur)
@@ -3942,7 +4010,7 @@ class ALNSSolver(QThread):
         Works even when every block only has a single destination.
         Returns (new_state, stripped: [(s_idx, b_idx, dests_list), ...]).
         """
-        state = copy.deepcopy(state)
+        state = _copy_state(state)
         candidates = [
             (s_idx, b_idx)
             for s_idx, (_sname, blocks) in enumerate(state)
@@ -3963,7 +4031,7 @@ class ALNSSolver(QThread):
             if not dests:
                 dk = block.get("dest_key",""); dn = block.get("dest_name","")
                 dests = [{"key": dk, "name": dn, "vol_partial": None}] if dk else []
-            stripped.append((s_idx, b_idx, copy.deepcopy(dests)))
+            stripped.append((s_idx, b_idx, [dict(d) for d in dests]))
             block["dests"]     = []
             block["dest_key"]  = ""
             block["dest_name"] = ""
@@ -3981,7 +4049,7 @@ class ALNSSolver(QThread):
         Cost of attaching dests_list to block (s2, b2) =
           route_km(block with dests_list appended) + volume_penalty_delta
         """
-        state   = copy.deepcopy(state)
+        state   = _copy_state(state)
         pending = list(stripped)   # [(s_idx, b_idx, dests_list)]
 
         # running vol totals for all already-assigned dests
@@ -4153,7 +4221,7 @@ class ALNSSolver(QThread):
             ALNSSolver._acc_block_vols(block, old_vols)
             for dk, v in old_vols.items():
                 cur_vols[dk] = cur_vols.get(dk, 0.0) - v
-            block["dests"]     = copy.deepcopy(dests_list)
+            block["dests"]     = [dict(d) for d in dests_list]
             block["dest_key"]  = dests_list[0].get("key","")  if dests_list else ""
             block["dest_name"] = dests_list[0].get("name","") if dests_list else ""
             # Add new volumes
@@ -4162,7 +4230,7 @@ class ALNSSolver(QThread):
         # Any still-pending items (no empty slots): put back on original block
         for s_src, b_src, dests_list in pending:
             block = state[s_src][1][b_src]
-            block["dests"]     = copy.deepcopy(dests_list)
+            block["dests"]     = [dict(d) for d in dests_list]
             block["dest_key"]  = dests_list[0].get("key","")  if dests_list else ""
             block["dest_name"] = dests_list[0].get("name","") if dests_list else ""
 
@@ -4192,10 +4260,10 @@ class ALNSSolver(QThread):
                and len(block.get("dests") or []) <= 5
         ]
         if not candidates:
-            return copy.deepcopy(state)
+            return _copy_state(state)
 
         s_idx, b_idx = random.choice(candidates)
-        state = copy.deepcopy(state)
+        state = _copy_state(state)
         blocks   = state[s_idx][1]
         block    = blocks[b_idx]
         dests    = block["dests"]
@@ -4258,10 +4326,10 @@ class ALNSSolver(QThread):
             and len(block["rows"]) >= 2
         ]
         if not candidates:
-            return copy.deepcopy(state)
+            return _copy_state(state)
 
         s_idx, b_idx = random.choice(candidates)
-        state = copy.deepcopy(state)
+        state = _copy_state(state)
         blocks = state[s_idx][1]
         block  = blocks[b_idx]
         rows   = block["rows"]
@@ -4301,7 +4369,7 @@ class ALNSSolver(QThread):
             and len(block["rows"]) >= seg_len + 1
         ]
         if not candidates:
-            return copy.deepcopy(state)
+            return _copy_state(state)
 
         s_idx, b_idx = random.choice(candidates)
         state = copy.deepcopy(state)
@@ -4337,7 +4405,7 @@ class ALNSSolver(QThread):
         Called once after the ALNS loop on best_state.  Guaranteed to return a
         solution at least as good as the input; never worsens.
         """
-        state   = copy.deepcopy(state)
+        state   = _copy_state(state)
         changed = True
         while changed:
             changed = False
@@ -4423,7 +4491,7 @@ class ALNSSolver(QThread):
             return {}
         try:
             return self._solve_group_inner(colour, sheets, total_iters, iter_offset)
-        except Exception as ex:
+        except Exception:
             import traceback
             tb = traceback.format_exc()
             self.log.emit(f"\n[{colour}] SOLVER CRASHED:\n{tb}")
@@ -4671,11 +4739,10 @@ class ALNSSolver(QThread):
                     frozen_cost_offset        += _sheet_cost([block], self.dm, st, self.cfg, dm_dur=self.dm_dur)
                     frozen_cost_offset_no_win += _sheet_cost([block], self.dm, st, cfg_no_win, dm_dur=self.dm_dur)
 
-        best_state = copy.deepcopy(state)
+        best_state = _copy_state(state)
         cur_sheet_cache  = self._make_sheet_cost_cache(state)
         best_cost  = sum(cur_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(state) - frozen_cost_offset
         cur_cost   = best_cost
-        best_sheet_cache = dict(cur_sheet_cache)
 
         cost_no_win = sum(
             _sheet_cost(blocks, self.dm,
@@ -4904,8 +4971,7 @@ class ALNSSolver(QThread):
                 if improved:
                     reward = REWARD
                     best_cost        = cur_cost
-                    best_state       = copy.deepcopy(state)
-                    best_sheet_cache = dict(cur_sheet_cache)
+                    best_state       = _copy_state(state)
                     iters_no_improve = 0
                 else:
                     reward = ACCEPT_REWARD
@@ -5005,7 +5071,7 @@ class ALNSSolver(QThread):
         vol_ok  = "OK" if abs(output_vol - input_vol) < 1 else f"(!) LOST {input_vol - output_vol:,.0f}L"
 
         # Full cost breakdown for the final best state
-        _km_f = _shift_f = _shift_pen_f = _shift_under_f = _milking_f = _cap_f = _win_f = 0.0
+        _km_f = _shift_f = _shift_pen_f = _shift_under_f = _milking_f = _cap_f = 0.0
         for sname_f, blocks_f in best_state:
             entry_f = self.cache.get(self.fname, {}).get(sname_f, {})
             st_f    = entry_f.get("start_time") if isinstance(entry_f, dict) else None
@@ -5119,7 +5185,7 @@ class ALNSSolver(QThread):
         # the adaptive scores of non-exploratory moves.  Here it runs once over
         # every eligible block after the search is complete.
         self.log.emit(f"[{colour}] Applying destination-order polish pass...")
-        shuffled = copy.deepcopy([(sn, blks) for sn, blks in best_state])
+        shuffled = _copy_state(best_state)
         for s_idx, (sn, blocks) in enumerate(shuffled):
             for b_idx, block in enumerate(blocks):
                 if _is_preload_block(block) or _is_fixed_vol_block(block):
@@ -5414,8 +5480,6 @@ class IRMALookupDialog(QDialog):
             kind_bg = KIND_COLOURS.get(h["kind"])
             bg      = kind_bg if kind_bg else src_bg
 
-            pos_label = (f"Dest {-h['f_idx']}" if h["f_idx"] < 0
-                         else f"Farm {h['f_idx'] + 1}")
             values = [
                 h["fname"],
                 h["sname"],
@@ -7081,7 +7145,6 @@ class MainWindow(QMainWindow):
         tf = QVBoxLayout(timing_frame); tf.setContentsMargins(10,8,10,8); tf.setSpacing(5)
         lbl_font  = QFont()
         val_font  = QFont(); val_font.setBold(True)
-        sep_color = "#e0e0e0"
         def add_timing_row(label, value, add_sep=True):
             row_w = QWidget(); row_w.setStyleSheet("background:transparent;")
             row_l = QHBoxLayout(row_w)
@@ -8401,7 +8464,7 @@ class MainWindow(QMainWindow):
             "vol_tol":               self._sw_vol_tol.value(),
             "vol_penalty":           self._sw_vol_pen.value(),
         }
-        lines = [f"Full Cost Report - Modified panel",
+        lines = ["Full Cost Report - Modified panel",
                  f"File: {fname}",
                  "=" * 70]
         grand = {k: 0.0 for k in ("km","milking","shift","overtime","cap","plant_win","total")}
@@ -8764,8 +8827,6 @@ class MainWindow(QMainWindow):
                     rows = block["rows"]
                     n    = len(rows)
                     if n < 2: continue
-                    origin = "VEDDER" if b_idx == 0 else (
-                        _block_last_dest_key(blocks[b_idx-1]) or "VEDDER")
                     base_c = _sheet_cost(blocks, self.dm, start_time, cfg, dm_dur=self.dm_dur)
                     best_rows = rows[:]
                     best_c    = base_c
@@ -8843,7 +8904,7 @@ class MainWindow(QMainWindow):
         """For every route with overtime, print a stop-by-stop timeline."""
         try:
             self._on_overtime_timeline_inner()
-        except Exception as ex:
+        except Exception:
             import traceback
             self._debug_text.setPlainText(
                 f"Overtime Timeline crashed:\n{traceback.format_exc()}")
@@ -8867,7 +8928,7 @@ class MainWindow(QMainWindow):
         }
         max_sh  = cfg["max_shift_h"]
         suppress = cfg["suppress_no_milking"]
-        lines = [f"Overtime Timeline - Modified panel",
+        lines = ["Overtime Timeline - Modified panel",
                  f"File: {fname}",
                  "=" * 70]
         n_overtime = 0
@@ -9414,7 +9475,6 @@ class MainWindow(QMainWindow):
                     dk = block.get("dest_key","")
                     dn = block.get("dest_name","") or dk
                     dests = [{"key": dk, "name": dn}] if dk else []
-                n_farms = len(block["rows"])
                 btimes  = all_times[b_idx] if b_idx < len(all_times) else None
                 if not btimes: continue
 
@@ -9460,7 +9520,7 @@ class MainWindow(QMainWindow):
                                 status = f"margin  {mins_to_close:.0f}m to close  pen={pen:.1f}"
                     dest_report[dk].append((sname, b_idx+1, arr_s, pen, status))
 
-        lines       = [f"Plant Window Cost Report - Modified panel",
+        lines       = ["Plant Window Cost Report - Modified panel",
                        f"File: {fname}",
                        "=" * 60]
         grand_total = 0.0
@@ -10769,7 +10829,6 @@ class MainWindow(QMainWindow):
             self._solver_progress.setValue(cur)
 
     def _on_intra_finished(self, results):
-        fname = self.file_cb.currentText()
         for key, blocks in results.items():
             self._sheet_mods[key] = blocks
         self._intra_btn.setEnabled(True)
@@ -11377,7 +11436,6 @@ class MainWindow(QMainWindow):
             txt.setStyleSheet("font-family: monospace; font-size: 8pt;")
             lay.addWidget(txt, stretch=1)
 
-            from PyQt5.QtWidgets import QDialogButtonBox
             btns = QDialogButtonBox(QDialogButtonBox.Ok)
             btns.accepted.connect(dlg.accept)
             lay.addWidget(btns)
@@ -12859,7 +12917,6 @@ def _run_selftests():
     These pin down the behaviour of the core time/volume functions so a future
     refactor can't silently change them. No GUI or data files required.
     """
-    import math as _math
     fails = []
 
     def check(name, cond):
