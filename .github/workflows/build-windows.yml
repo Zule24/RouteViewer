@@ -5,8 +5,16 @@
 #   - Tag matching v*        (release builds attached to a GitHub Release)
 #   - Manual via the Actions tab ("Run workflow")
 #
-# Output: a downloadable artifact called RouteViewer-windows containing
-# RouteViewer.exe.  For tag pushes, the exe is also attached to the Release.
+# Output:
+#   RouteViewer-windows/
+#     RouteViewer.exe            — the application
+#     distance_matrix.csv        — road distances (kept OUTSIDE the bundle)
+#     duration_matrix.csv        — road durations (kept OUTSIDE the bundle)
+#     add_farm.py                — utility to add new farms without rebuilding
+#
+# The two CSV files are intentionally NOT bundled inside the exe.  They live
+# next to it so that add_farm.py can update them independently.  The viewer
+# loads them from get_matrix_dir() = Path(sys.executable).parent at runtime.
 #
 # Place this file at .github/workflows/build-windows.yml in your repo.
 
@@ -17,7 +25,7 @@ on:
     branches: [main]
     paths:    ['viewer160.py']   # only rebuild when the source changes
     tags:     ['v*']
-  workflow_dispatch:   # adds a "Run workflow" button in the Actions tab
+  workflow_dispatch:
 
 jobs:
   build:
@@ -30,7 +38,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'      # PyQt5 wheels are well-tested here
+          python-version: '3.11'
           cache: pip
 
       - name: Install dependencies
@@ -39,10 +47,6 @@ jobs:
           pip install pyinstaller PyQt5 openpyxl
 
       - name: Sanity-check the source (compile + self-tests)
-        # Catches syntax errors and breakage in the pure domain helpers before
-        # we spend a few minutes building the exe.  --selftest is the harness
-        # added in the refactor; it exercises calc_times helpers, the offload
-        # accounting, the floor/ceiling redistribution, etc.
         run: |
           python -m py_compile viewer160.py
           python viewer160.py --selftest
@@ -50,39 +54,46 @@ jobs:
       - name: Build with PyInstaller
         # --onefile           single self-contained exe
         # --windowed          suppress the console window behind the GUI
-        # --name              output filename
-        # --add-data "src;."  bundle CSVs at the bundle root so get_data_dir()
-        #                     (sys._MEIPASS at runtime) finds them.
-        #                     Semicolon is the Windows path separator here.
-        # Matrices and the three-window farm overrides are all bundled.
+        # Note: distance_matrix.csv and duration_matrix.csv are NOT bundled —
+        # they live next to the exe and are distributed as separate files.
+        # Only three_window_farms.json is bundled (it is read-only config).
         run: >
           pyinstaller --onefile --windowed --name "RouteViewer"
-          --add-data "distance_matrix.csv;."
-          --add-data "duration_matrix.csv;."
           --add-data "three_window_farms.json;."
           viewer160.py
 
-      - name: Smoke-test the exe builds and launches
-        # Run the frozen exe with --selftest so we know the bundle is wired up
-        # before we ship the artifact.  Without --windowed this would block on
-        # a GUI; --selftest exits before any Qt code runs.
+      - name: Assemble release folder
+        # Copy the exe plus the external data files into a single folder so
+        # the artifact download contains everything needed to run the program.
         shell: pwsh
         run: |
-          .\dist\RouteViewer.exe --selftest
+          New-Item -ItemType Directory -Path release
+          Copy-Item dist\RouteViewer.exe   release\
+          Copy-Item distance_matrix.csv    release\
+          Copy-Item duration_matrix.csv    release\
+          Copy-Item add_farm.py            release\
+
+      - name: Smoke-test the exe
+        shell: pwsh
+        run: |
+          .\release\RouteViewer.exe --selftest
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload exe as workflow artifact
-        # Available from the Actions run page for 90 days by default.
+      - name: Upload release folder as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: RouteViewer-windows
-          path: dist/RouteViewer.exe
+          path: release/
           if-no-files-found: error
 
-      - name: Attach exe to GitHub Release (tag pushes only)
+      - name: Attach files to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/RouteViewer.exe
+          files: |
+            release/RouteViewer.exe
+            release/distance_matrix.csv
+            release/duration_matrix.csv
+            release/add_farm.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
