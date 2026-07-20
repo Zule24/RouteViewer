@@ -1,4 +1,4 @@
-# Builds RouteViewer.exe on a Windows runner using PyInstaller.
+# Builds RouteViewer.exe and AddFarm.exe on a Windows runner using PyInstaller.
 #
 # Triggers:
 #   - Push to main           (continuous builds)
@@ -7,14 +7,17 @@
 #
 # Output:
 #   RouteViewer-windows/
-#     RouteViewer.exe            — the application
-#     distance_matrix.csv        — road distances (kept OUTSIDE the bundle)
-#     duration_matrix.csv        — road durations (kept OUTSIDE the bundle)
-#     add_farm.py                — utility to add new farms without rebuilding
+#     RouteViewer.exe            -- the main application
+#     AddFarm.exe                -- utility to add new farms (no Python needed)
+#     distance_matrix.csv        -- road distances (kept outside the bundle)
+#     duration_matrix.csv        -- road durations (kept outside the bundle)
+#     extracted.xlsx             -- farm coordinate registry
+#     routes.db                  -- map visualizer database
 #
-# The two CSV files are intentionally NOT bundled inside the exe.  They live
-# next to it so that add_farm.py can update them independently.  The viewer
-# loads them from get_matrix_dir() = Path(sys.executable).parent at runtime.
+# The two CSVs, extracted.xlsx, and routes.db are intentionally NOT bundled
+# inside RouteViewer.exe. They live next to it so AddFarm.exe can update them
+# without rebuilding. The viewer loads them from get_matrix_dir() =
+# Path(sys.executable).parent at runtime.
 #
 # Place this file at .github/workflows/build-windows.yml in your repo.
 
@@ -23,7 +26,7 @@ name: Build Windows exe
 on:
   push:
     branches: [main]
-    paths:    ['viewer160.py']   # only rebuild when the source changes
+    paths:    ['viewer160.py', 'add_farm.py']
     tags:     ['v*']
   workflow_dispatch:
 
@@ -44,36 +47,36 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller PyQt5 openpyxl
+          pip install pyinstaller PyQt5 openpyxl requests
 
-      - name: Sanity-check the source (compile + self-tests)
+      - name: Sanity-check the source
         run: |
           python -m py_compile viewer160.py
           python viewer160.py --selftest
+          python -m py_compile add_farm.py
 
-      - name: Build with PyInstaller
-        # --onefile           single self-contained exe
-        # --windowed          suppress the console window behind the GUI
-        # Note: distance_matrix.csv and duration_matrix.csv are NOT bundled —
-        # they live next to the exe and are distributed as separate files.
-        # Only three_window_farms.json is bundled (it is read-only config).
+      - name: Build RouteViewer.exe
         run: >
           pyinstaller --onefile --windowed --name "RouteViewer"
           --add-data "three_window_farms.json;."
           viewer160.py
 
+      - name: Build AddFarm.exe
+        run: >
+          pyinstaller --onefile --windowed --name "AddFarm"
+          add_farm.py
+
       - name: Assemble release folder
-        # Copy the exe plus the external data files into a single folder so
-        # the artifact download contains everything needed to run the program.
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release
           Copy-Item dist\RouteViewer.exe   release\
+          Copy-Item dist\AddFarm.exe       release\
           Copy-Item distance_matrix.csv    release\
           Copy-Item duration_matrix.csv    release\
-          Copy-Item add_farm.py            release\
+          Copy-Item routes.db              release\
 
-      - name: Smoke-test the exe
+      - name: Smoke-test RouteViewer.exe
         shell: pwsh
         run: |
           .\release\RouteViewer.exe --selftest
@@ -92,8 +95,10 @@ jobs:
         with:
           files: |
             release/RouteViewer.exe
+            release/AddFarm.exe
             release/distance_matrix.csv
             release/duration_matrix.csv
-            release/add_farm.py
+            release/extracted.xlsx
+            release/routes.db
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
