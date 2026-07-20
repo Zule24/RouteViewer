@@ -51,6 +51,7 @@ C_IRMA=1; C_TRAIN=4; C_M1_START=5; C_M1_FINISH=8; C_M2_START=11
 C_M2_FINISH=14; C_EDPU=17; C_ROUTE=21; C_LOCATION=32; C_PRIOR_VOL=51
 C_DRIVER_START = 52   # AZ1 - driver start time (datetime.time)
 C_DAY_COLOUR   = 62   # BJ1 - day colour string (RED/BLUE/GRASSFED/A2 etc.)
+C_SHEET_DATE   = 35   # AI1 - sheet date string (merged AI1:AU1, e.g. "Monday July 14, 2025")
 
 DRIVE_SPEED_KMH = 50.0   # km/h average
 ONSITE_MIN      = 15.0   # fixed on-site setup minutes per stop
@@ -62,6 +63,12 @@ INTER_PROCESSOR_BREAK    = 10   # break minutes inserted between processor stops
 
 # Farms whose milking windows can be suppressed (e.g. robots / continuous milking)
 NO_MILKING_WINDOW_FARMS = {"37-874", "14-247", "92-545", "21-132"}
+
+# Regulatory milking buffer constants
+# 2025 BC regs: 2 h pre-window (wash cycle) + 1 h post-window (milk cooling)
+# No pickup is permitted within these extended exclusion zones.
+MILKING_PRE_BUFFER_MINS  = 120.0   # hours before window start -> no pickup
+MILKING_POST_BUFFER_MINS = 60.0    # hours after  window end   -> no pickup
 
 # Three-window farm data loaded from JSON at startup
 def _load_three_window_farms():
@@ -224,6 +231,18 @@ def get_data_dir():
         return Path(sys.executable).parent
     return Path(__file__).parent
 
+def get_matrix_dir():
+    """Directory where the distance/duration CSVs live.
+
+    Always returns the folder containing the exe (or this script when running
+    from source).  The matrices are kept OUTSIDE the PyInstaller bundle so
+    they can be updated with add_farm.py without rebuilding the exe.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
 def fmt_time(v):
     if isinstance(v, dt_time): return f"{v.hour:02d}:{v.minute:02d}"
     if isinstance(v, str): return _sanitise_time_str(v)
@@ -331,6 +350,102 @@ def time_in_window(t, start_s, finish_s):
     else:  # overnight
         return t >= ts or t <= tf
 
+_MONTH_NAMES = {
+    "january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
+}
+
+
+def _parse_sheet_date_str(val):
+    """Parse date strings from AI1 into a datetime.date.
+
+    Handles the format variants seen in real workbooks:
+      'Sunday June 7 2026'        – no commas
+      'Monday June 8, 2026'       – comma after day
+      'Saturday, May 23, 2026'    – comma after weekday too
+      'Tuesday, April 28 th'      – ordinal suffix, no year (uses current year)
+    Returns None if the value cannot be parsed.
+    """
+    if not isinstance(val, str):
+        return None
+    # Strip ordinal suffixes ('28 th', '1st', '2nd', '3rd') before matching
+    s = re.sub(r'(\d)\s*(?:st|nd|rd|th)\b', r'\1', val.strip(), flags=re.IGNORECASE)
+    # Match: <Month> <Day> [,] [<Year>]  — weekday prefix is ignored by re.search
+    m = re.search(r'(\w+)\s+(\d{1,2}),?\s*(\d{4})?', s)
+    if not m:
+        return None
+    mon = _MONTH_NAMES.get(m.group(1).lower())
+    if not mon:
+        return None
+    try:
+        yr = int(m.group(3)) if m.group(3) else date.today().year
+        return date(yr, mon, int(m.group(2)))
+    except ValueError:
+        return None
+
+
+def _extract_row1_date(ws):
+    """Read the sheet date from the merged cell AI1 (C_SHEET_DATE = 35).
+
+    The cell contains a string formatted as '[Day of week] [Month] [Day#], [Year]'
+    e.g. 'Monday July 14, 2025'.  openpyxl returns the merged region's value
+    from the top-left cell only; the rest of the merged range is None.
+    Also handles the (unlikely) case where openpyxl returns an actual
+    datetime.date/datetime.datetime object instead of a string.
+    """
+    from datetime import datetime as _dt
+    val = ws.cell(1, C_SHEET_DATE).value
+    if isinstance(val, date) and not isinstance(val, _dt):
+        return val
+    if isinstance(val, _dt):
+        return val.date()
+    return _parse_sheet_date_str(val)
+
+
+def _sheets_date_str(cache, fname):
+    """Return a compact date string from the sheet_date fields in the cache.
+
+    Single date  -> "Jul_14"    (used as PDF filename prefix)
+    Date range   -> "Jul_14-16" if same month, "Jul_14-Aug_02" across months
+    No dates     -> "" (caller falls back to workbook filename stem)
+    """
+    dates = sorted(
+        {entry["sheet_date"]
+         for entry in cache.get(fname, {}).values()
+         if isinstance(entry, dict) and entry.get("sheet_date")
+         and ("RED" in (entry.get("day_colour") or "")
+              or "BLUE" in (entry.get("day_colour") or ""))}
+    )
+    if not dates:
+        return ""
+    lo, hi = dates[0], dates[-1]
+    if lo == hi:
+        return f"{lo.strftime('%b')}_{lo.day}"              # "Jul_14"
+    if lo.month == hi.month:
+        return f"{lo.strftime('%b')}_{lo.day}-{hi.day}"     # "Jul_14-16"
+    return f"{lo.strftime('%b')}_{lo.day}-{hi.strftime('%b')}_{hi.day}"  # "Jul_14-Aug_2"
+
+
+def _extended_milking_window(start_str, finish_str):
+    """Return (ext_start, ext_finish) as datetime.time with regulatory buffers.
+
+    Extends the raw milking window [start_str, finish_str] by
+    MILKING_PRE_BUFFER_MINS before the start and MILKING_POST_BUFFER_MINS
+    after the finish.  The extended zone is treated as a complete no-pickup
+    window by the solver and cost functions.  Returns (None, None) if either
+    boundary cannot be parsed.  time_in_window() already handles overnight
+    windows, so wrapping-past-midnight extended times are safe.
+    """
+    ts = parse_hhmm(start_str)
+    tf = parse_hhmm(finish_str)
+    if ts is None or tf is None:
+        return None, None
+    today = date.today()
+    ext_s = (datetime.combine(today, ts) - timedelta(minutes=MILKING_PRE_BUFFER_MINS)).time()
+    ext_f = (datetime.combine(today, tf) + timedelta(minutes=MILKING_POST_BUFFER_MINS)).time()
+    return ext_s, ext_f
+
+
 def arrives_during_milking(arr_time, row_data, suppress_no_milking=True):
     """Return True if arr_time (datetime.time) falls within any milking window.
     Supports w1/w2 from the sheet and w3 from THREE_WINDOW_FARMS.
@@ -340,14 +455,17 @@ def arrives_during_milking(arr_time, row_data, suppress_no_milking=True):
     if suppress_no_milking and irma in NO_MILKING_WINDOW_FARMS:
         return False
     for start_key, finish_key in [("m1_start","m1_finish"),("m2_start","m2_finish")]:
-        if time_in_window(arr_time, row_data.get(start_key,""), row_data.get(finish_key,"")):
+        ext_s, ext_f = _extended_milking_window(
+            row_data.get(start_key,""), row_data.get(finish_key,""))
+        if ext_s is not None and time_in_window(arr_time, ext_s, ext_f):
             return True
     # Third window from THREE_WINDOW_FARMS
     w3 = THREE_WINDOW_FARMS.get(irma)
     if w3:
         w3_start = w3.get("w3", [None, None])[0]
         w3_finish = w3.get("w3", [None, None])[1]
-        if w3_start and w3_finish and time_in_window(arr_time, w3_start, w3_finish):
+        ext_s3, ext_f3 = _extended_milking_window(w3_start, w3_finish)
+        if ext_s3 is not None and time_in_window(arr_time, ext_s3, ext_f3):
             return True
     return False
 
@@ -494,11 +612,12 @@ def _build_block_stops(block, origin, is_last):
     return stops
 
 
-def _pdf_from_text(text, title, parent=None):
+def _pdf_from_text(text, title, parent=None, fname="", date_str=""):
     """Save monospace text content to a portrait A4 PDF via QPrinter."""
+    _prefix = (date_str + "_") if date_str else (Path(fname).stem + "_" if fname else "")
     path, _ = QFileDialog.getSaveFileName(
         parent, f"Export {title}",
-        title.replace(" ", "_").replace("/", "-") + ".pdf",
+        _prefix + title.replace(" ", "_").replace("/", "-") + ".pdf",
         "PDF Files (*.pdf)")
     if not path:
         return
@@ -513,11 +632,12 @@ def _pdf_from_text(text, title, parent=None):
     doc.print_(printer)
 
 
-def _pdf_from_widget(widget, title, parent=None, landscape=True):
+def _pdf_from_widget(widget, title, parent=None, landscape=True, fname="", date_str=""):
     """Render a QWidget directly to a landscape (default) A4 PDF at printer resolution."""
+    _prefix = (date_str + "_") if date_str else (Path(fname).stem + "_" if fname else "")
     path, _ = QFileDialog.getSaveFileName(
         parent, f"Export {title}",
-        title.replace(" ", "_").replace("/", "-") + ".pdf",
+        _prefix + title.replace(" ", "_").replace("/", "-") + ".pdf",
         "PDF Files (*.pdf)")
     if not path:
         return
@@ -903,23 +1023,23 @@ def calc_times(blocks, dm, start_time, dm_dur=None, suppress_no_milking=True,
                         pass
                     else:
                         for s_key, f_key in [("m1_start","m1_finish"),("m2_start","m2_finish")]:
-                            if time_in_window(arr_dt.time(), farm.get(s_key,""), farm.get(f_key,"")):
-                                tf = parse_hhmm(farm.get(f_key,""))
-                                if tf:
-                                    end_w = datetime.combine(date.today(), tf)
-                                    if end_w <= arr_dt: end_w += timedelta(days=1)
-                                    wait_mins = (end_w - arr_dt).total_seconds() / 60.0
+                            ext_s, ext_f = _extended_milking_window(
+                                farm.get(s_key,""), farm.get(f_key,""))
+                            if ext_s is not None and time_in_window(arr_dt.time(), ext_s, ext_f):
+                                # Wait until extended finish (window end + post buffer)
+                                end_w = datetime.combine(arr_dt.date(), ext_f)
+                                if end_w <= arr_dt: end_w += timedelta(days=1)
+                                wait_mins = (end_w - arr_dt).total_seconds() / 60.0
                                 break
                         if wait_mins == 0.0:
                             w3data = THREE_WINDOW_FARMS.get(irma)
                             if w3data:
                                 w3s, w3f = w3data.get("w3",[None,None])
-                                if w3s and w3f and time_in_window(arr_dt.time(), w3s, w3f):
-                                    tf3 = parse_hhmm(w3f)
-                                    if tf3:
-                                        end_w3 = datetime.combine(date.today(), tf3)
-                                        if end_w3 <= arr_dt: end_w3 += timedelta(days=1)
-                                        wait_mins = (end_w3 - arr_dt).total_seconds() / 60.0
+                                ext_s3, ext_f3 = _extended_milking_window(w3s, w3f)
+                                if ext_s3 is not None and time_in_window(arr_dt.time(), ext_s3, ext_f3):
+                                    end_w3 = datetime.combine(arr_dt.date(), ext_f3)
+                                    if end_w3 <= arr_dt: end_w3 += timedelta(days=1)
+                                    wait_mins = (end_w3 - arr_dt).total_seconds() / 60.0
 
                     dep_dt = arr_dt + timedelta(minutes=wait_mins + dur)
                     block_times.append({"arr": arr_dt.time(), "dep": dep_dt.time(),
@@ -1833,8 +1953,14 @@ class FileLoader(QThread):
                         self.sheet_warning.emit(self.fname, n, w)
 
                     if blocks or start_time:
+                        _raw_ai1    = ws_cached.cell(1, C_SHEET_DATE).value
+                        _sheet_date = _extract_row1_date(ws_cached)
+                        if _raw_ai1 is not None and _sheet_date is None:
+                            logger.debug("[%s / %s] AI1 value not parsed as date: %r",
+                                         self.fname, n, _raw_ai1)
                         sheets[n] = {"blocks": blocks, "start_time": start_time,
-                                     "day_colour": day_colour}
+                                     "day_colour": day_colour,
+                                     "sheet_date": _sheet_date}
                     else:
                         # Emit a warning so it's visible even when no blocks
                         # or start_time were found (sheet would be silently
@@ -2433,28 +2559,26 @@ def _route_cost_with_milking(block, dm, origin="VEDDER",
             arr_t  = cursor.time()
             wait_m = 0.0
 
-            # w1 / w2
+            # w1 / w2 (extended by regulatory pre/post buffers)
             for s_key, f_key in [("m1_start","m1_finish"),("m2_start","m2_finish")]:
-                if time_in_window(arr_t, farm.get(s_key,""), farm.get(f_key,"")):
-                    tf = parse_hhmm(farm.get(f_key,""))
-                    if tf:
-                        end_w = _dt.combine(cursor.date(), tf)
-                        if end_w <= cursor:
-                            end_w += _td(days=1)
-                        wait_m = (end_w - cursor).total_seconds() / 60.0
+                ext_s, ext_f = _extended_milking_window(farm.get(s_key,""), farm.get(f_key,""))
+                if ext_s is not None and time_in_window(arr_t, ext_s, ext_f):
+                    end_w = _dt.combine(cursor.date(), ext_f)
+                    if end_w <= cursor:
+                        end_w += _td(days=1)
+                    wait_m = (end_w - cursor).total_seconds() / 60.0
                     break
-            # w3
+            # w3 (extended)
             if wait_m == 0.0:
                 w3data = THREE_WINDOW_FARMS.get(irma)
                 if w3data:
                     w3s, w3f = w3data.get("w3", [None, None])
-                    if w3s and w3f and time_in_window(arr_t, w3s, w3f):
-                        tf3 = parse_hhmm(w3f)
-                        if tf3:
-                            end_w3 = _dt.combine(cursor.date(), tf3)
-                            if end_w3 <= cursor:
-                                end_w3 += _td(days=1)
-                            wait_m = (end_w3 - cursor).total_seconds() / 60.0
+                    ext_s3, ext_f3 = _extended_milking_window(w3s, w3f)
+                    if ext_s3 is not None and time_in_window(arr_t, ext_s3, ext_f3):
+                        end_w3 = _dt.combine(cursor.date(), ext_f3)
+                        if end_w3 <= cursor:
+                            end_w3 += _td(days=1)
+                        wait_m = (end_w3 - cursor).total_seconds() / 60.0
 
             # Penalty: wait_mins * milking_weight (same units as km at ~1.2 min/km)
             wait_pen += wait_m * milking_weight
@@ -2557,30 +2681,28 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
                     if farm.get("_mwo"):
                         continue
 
+                    # Extended window: raw [m_start, m_finish] ± regulatory buffers
                     for s_key, f_key in [("m1_start", "m1_finish"),
                                          ("m2_start", "m2_finish")]:
-                        s_str = farm.get(s_key, "")
-                        f_str = farm.get(f_key, "")
-                        if time_in_window(arr, s_str, f_str):
-                            tf = parse_hhmm(f_str)
-                            if tf:
-                                end_w = datetime.combine(date.today(), tf)
-                                if end_w < arr_dt:
-                                    end_w += timedelta(days=1)
-                                milking_mins += (end_w - arr_dt).total_seconds() / 60.0
+                        ext_s, ext_f = _extended_milking_window(
+                            farm.get(s_key, ""), farm.get(f_key, ""))
+                        if ext_s is not None and time_in_window(arr, ext_s, ext_f):
+                            end_w = datetime.combine(date.today(), ext_f)
+                            if end_w < arr_dt:
+                                end_w += timedelta(days=1)
+                            milking_mins += (end_w - arr_dt).total_seconds() / 60.0
                             break
-                    # w3 penalty
+                    # w3 penalty (extended)
                     w3data = THREE_WINDOW_FARMS.get(farm.get("irma",""))
                     if w3data:
                         w3pair = w3data.get("w3", [None, None])
                         w3s, w3f = w3pair[0], w3pair[1]
-                        if w3s and w3f and time_in_window(arr, w3s, w3f):
-                            tf3 = parse_hhmm(w3f)
-                            if tf3:
-                                end_w3 = datetime.combine(date.today(), tf3)
-                                if end_w3 < arr_dt:
-                                    end_w3 += timedelta(days=1)
-                                milking_mins += (end_w3 - arr_dt).total_seconds() / 60.0
+                        ext_s3, ext_f3 = _extended_milking_window(w3s, w3f)
+                        if ext_s3 is not None and time_in_window(arr, ext_s3, ext_f3):
+                            end_w3 = datetime.combine(date.today(), ext_f3)
+                            if end_w3 < arr_dt:
+                                end_w3 += timedelta(days=1)
+                            milking_mins += (end_w3 - arr_dt).total_seconds() / 60.0
 
     # -- plant volume penalty (group-wide vols supplied via cfg) ---------------
     # NOTE: vol penalty is computed at group level in _group_cost to avoid
@@ -2808,23 +2930,24 @@ def _sheet_cost_breakdown(blocks, dm, start_time, cfg, dm_dur=None):
                         continue
                     if farm.get("_mwo"):
                         continue
+                    # Extended window: raw [m_start, m_finish] ± regulatory buffers
                     for s_key, f_key in [("m1_start","m1_finish"),("m2_start","m2_finish")]:
-                        if time_in_window(arr, farm.get(s_key,""), farm.get(f_key,"")):
-                            tf = parse_hhmm(farm.get(f_key,""))
-                            if tf:
-                                end_w = datetime.combine(date.today(), tf)
-                                if end_w < arr_dt: end_w += timedelta(days=1)
-                                milking_mins += (end_w - arr_dt).total_seconds() / 60.0
+                        ext_s, ext_f = _extended_milking_window(
+                            farm.get(s_key,""), farm.get(f_key,""))
+                        if ext_s is not None and time_in_window(arr, ext_s, ext_f):
+                            end_w = datetime.combine(date.today(), ext_f)
+                            if end_w < arr_dt: end_w += timedelta(days=1)
+                            milking_mins += (end_w - arr_dt).total_seconds() / 60.0
                             break
+                    # w3 (extended)
                     w3data = THREE_WINDOW_FARMS.get(farm.get("irma",""))
                     if w3data:
                         w3s, w3f = w3data.get("w3",[None,None])
-                        if w3s and w3f and time_in_window(arr, w3s, w3f):
-                            tf3 = parse_hhmm(w3f)
-                            if tf3:
-                                end_w3 = datetime.combine(date.today(), tf3)
-                                if end_w3 < arr_dt: end_w3 += timedelta(days=1)
-                                milking_mins += (end_w3 - arr_dt).total_seconds() / 60.0
+                        ext_s3, ext_f3 = _extended_milking_window(w3s, w3f)
+                        if ext_s3 is not None and time_in_window(arr, ext_s3, ext_f3):
+                            end_w3 = datetime.combine(date.today(), ext_f3)
+                            if end_w3 < arr_dt: end_w3 += timedelta(days=1)
+                            milking_mins += (end_w3 - arr_dt).total_seconds() / 60.0
 
     # -- cap -------------------------------------------------------------------
     hard_cap     = cfg.get("hard_vol_cap", HARD_CAP)
@@ -6101,7 +6224,7 @@ class TruckAvailDialog(QDialog):
     Includes a RED / BLUE / All filter.
     """
 
-    def __init__(self, day_routes, night_routes, night_start_mins, parent=None):
+    def __init__(self, day_routes, night_routes, night_start_mins, parent=None, fname="", date_str=""):
         super().__init__(parent)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle("Truck Availability - Return Times")
@@ -6111,6 +6234,8 @@ class TruckAvailDialog(QDialog):
         self._all_day     = day_routes
         self._all_night   = night_routes
         self._night_start = night_start_mins
+        self._fname       = fname
+        self._date_str    = date_str
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -6161,7 +6286,7 @@ class TruckAvailDialog(QDialog):
         pdf_btn.setToolTip("Export the truck availability timeline to a landscape A4 PDF.")
         pdf_btn.clicked.connect(lambda: _pdf_from_widget(
             self._scroll.widget(), "Truck_Availability_Timeline",
-            parent=self, landscape=True))
+            parent=self, landscape=True, fname=self._fname, date_str=self._date_str))
         close_row.addWidget(pdf_btn)
         btn = QPushButton("Close")
         btn.clicked.connect(self.close)
@@ -6222,12 +6347,14 @@ class ProcessorScheduleDialog(QDialog):
     so "All" is still safe to use - it just shows more at once.
     """
 
-    def __init__(self, visits, avoid_windows, fname, parent=None):
+    def __init__(self, visits, avoid_windows, fname, parent=None, date_str=""):
         super().__init__(parent)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowTitle(f"Processor Schedule - {fname}")
         self.setMinimumSize(900, 640)
         self.resize(1400, 800)
+        self._fname        = fname
+        self._date_str     = date_str
         self._all_visits   = visits
         self._avoid_windows = avoid_windows
 
@@ -6325,7 +6452,8 @@ class ProcessorScheduleDialog(QDialog):
             "border-radius:3px;padding:0 10px;}")
         pdf_btn.setToolTip("Export the processor schedule to a landscape A4 PDF.")
         pdf_btn.clicked.connect(lambda: _pdf_from_widget(
-            self._chart, "Processor_Schedule", parent=self, landscape=True))
+            self._chart, "Processor_Schedule", parent=self, landscape=True,
+            fname=self._fname, date_str=self._date_str))
         close_row.addWidget(pdf_btn)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -7021,8 +7149,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Vedder D100 Route Manager")
         self.resize(1700, 960)
         self.data_root    = get_exe_dir() / "anonymized_output"
-        self.dm           = load_distance_matrix(get_data_dir() / "distance_matrix.csv")
-        self.dm_dur       = load_distance_matrix(get_data_dir() / "duration_matrix.csv")
+        self.dm           = load_distance_matrix(get_matrix_dir() / "distance_matrix.csv")
+        self.dm_dur       = load_distance_matrix(get_matrix_dir() / "duration_matrix.csv")
         # Precompute set of all node keys known to the distance matrix for fast validation
         self._dm_keys: set = {k for pair in self.dm for k in pair}
         self._file_map    = {}
@@ -7129,6 +7257,15 @@ class MainWindow(QMainWindow):
         self.shift_type_box.setFixedHeight(22)
         self.shift_type_box.setStyleSheet("border-radius: 3px; padding: 1px 6px; font-size: 8pt;")
         ll.addWidget(self.shift_type_box)
+        ll.addSpacing(6)
+
+        # Sheet date label (e.g. "Monday July 14, 2025")
+        self.sheet_date_lbl = QLabel("")
+        self.sheet_date_lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.sheet_date_lbl.setWordWrap(True)
+        self.sheet_date_lbl.setStyleSheet(
+            "color: #555; font-size: 8pt; padding: 0 4px;")
+        ll.addWidget(self.sheet_date_lbl)
         ll.addSpacing(8)
 
         # Timing assumptions box
@@ -8437,7 +8574,8 @@ class MainWindow(QMainWindow):
                 "No processor visits with usable arrival/departure times "
                 "were found for this file.")
             return
-        dlg = ProcessorScheduleDialog(visits, AVOID_WINDOWS, fname, parent=self)
+        dlg = ProcessorScheduleDialog(visits, AVOID_WINDOWS, fname, parent=self,
+                                      date_str=_sheets_date_str(self._cache, fname))
         dlg.exec_()
 
     def _on_full_cost_report(self):
@@ -9267,7 +9405,9 @@ class MainWindow(QMainWindow):
                     if dests:
                         for dest in dests:
                             key  = dest.get("key") or dest.get("dest_key") or "?"
-                            lines.append(f"      →  Processor: {key}")
+                            name = (dest.get("name") or "").strip()
+                            proc_str = f"{name}  ({key})" if name else key
+                            lines.append(f"      →  Processor: {proc_str}")
 
                 lines.append("")
 
@@ -9680,7 +9820,9 @@ class MainWindow(QMainWindow):
             return
         # Use first line as title
         title = text.split("\n")[0][:60].strip() or "Report"
-        _pdf_from_text(text, title, parent=self)
+        _cur_fname = self.file_cb.currentText()
+        _pdf_from_text(text, title, parent=self, fname=_cur_fname,
+                       date_str=_sheets_date_str(self._cache, _cur_fname))
 
     def _copy_debug_text(self):
         from PyQt5.QtWidgets import QApplication as _QApp
@@ -11070,22 +11212,39 @@ class MainWindow(QMainWindow):
     def _year_folders(self):
         result = {}
         if self.data_root.exists():
-            for d in sorted(self.data_root.iterdir()):
+            try:
+                entries = sorted(self.data_root.iterdir())
+            except PermissionError:
+                self.statusBar().showMessage(
+                    f"Permission denied reading '{self.data_root}'")
+                return result
+            for d in entries:
                 if d.is_dir(): result[extract_year(d.name)] = d
         return result
 
     def _month_folders(self, ypath):
         result = {}
         if ypath and ypath.exists():
-            for d in sorted([d for d in ypath.iterdir() if d.is_dir()],
-                            key=lambda d: month_key(d.name)):
+            try:
+                entries = [d for d in ypath.iterdir() if d.is_dir()]
+            except PermissionError:
+                self.statusBar().showMessage(
+                    f"Permission denied reading '{ypath}'")
+                return result
+            for d in sorted(entries, key=lambda d: month_key(d.name)):
                 result[d.name] = d
         return result
 
     def _xlsx_files(self, mpath):
         result = {}
         if mpath and mpath.exists():
-            for f in sorted(mpath.glob("*.xlsx")):
+            try:
+                files = sorted(mpath.glob("*.xlsx"))
+            except PermissionError:
+                self.statusBar().showMessage(
+                    f"Permission denied reading '{mpath}'")
+                return result
+            for f in files:
                 result[f.name] = f
         return result
 
@@ -11104,7 +11263,12 @@ class MainWindow(QMainWindow):
         if not chosen:
             return   # user cancelled
         self.data_root = Path(chosen)
-        self._scan_folders()
+        try:
+            self._scan_folders()
+        except OSError as exc:
+            self.statusBar().showMessage(
+                f"Cannot read folder: {exc}")
+            return
         # If no year folders were found, warn the user
         if not self._year_map:
             self.statusBar().showMessage(
@@ -11512,6 +11676,13 @@ class MainWindow(QMainWindow):
             self.day_colour_box.setStyleSheet(
                 "border-radius: 4px; padding: 2px 6px;")
         self._update_shift_type_badge()
+        # Sheet date — read from cache for the current sheet
+        _fname = self.file_cb.currentText() if hasattr(self, "file_cb") else ""
+        _sname = self.sheet_cb.currentText() if hasattr(self, "sheet_cb") else ""
+        _entry = self._cache.get(_fname, {}).get(_sname, {})
+        _sd    = _entry.get("sheet_date") if isinstance(_entry, dict) else None
+        self.sheet_date_lbl.setText(
+            f"{_sd.strftime('%A %B')} {_sd.day}, {_sd.year}" if _sd else "")
 
     def _update_shift_type_badge(self):
         """Show DAY or NIGHT label based on the current sheet's start time."""
@@ -11678,7 +11849,8 @@ class MainWindow(QMainWindow):
                 dlg.update_routes(day_routes, night_routes, night_start_mins)
                 dlg.raise_()
             else:
-                dlg = TruckAvailDialog(day_routes, night_routes, night_start_mins, self)
+                dlg = TruckAvailDialog(day_routes, night_routes, night_start_mins, self,
+                                       fname=fname, date_str=_sheets_date_str(self._cache, fname))
                 self._truck_avail_dlg = dlg
                 dlg.show()
         except Exception as _exc:
@@ -12943,6 +13115,25 @@ def _run_selftests():
     check("window overnight b", time_in_window(dt_time(1, 0),  "22:00", "02:00") is True)
     check("window overnight c", time_in_window(dt_time(12, 0), "22:00", "02:00") is False)
     check("window none",        time_in_window(None,           "06:00", "08:00") is False)
+
+    # Extended milking window helper (2 h pre, 1 h post)
+    # Raw window 06:00–08:00 → extended 04:00–09:00
+    def ext(s_str, f_str): return _extended_milking_window(s_str, f_str)
+    es, ef = ext("06:00", "08:00")
+    check("ext window start",   es == dt_time(4, 0))
+    check("ext window finish",  ef == dt_time(9, 0))
+    check("ext window pre-zone in",    time_in_window(dt_time(5, 0),  es, ef) is True)
+    check("ext window pre-zone out",   time_in_window(dt_time(3, 59), es, ef) is False)
+    check("ext window post-zone in",   time_in_window(dt_time(8, 59), es, ef) is True)
+    check("ext window post-zone out",  time_in_window(dt_time(9, 1),  es, ef) is False)
+    # Overnight base window 22:00–02:00 → extended 20:00–03:00
+    es2, ef2 = ext("22:00", "02:00")
+    check("ext overnight start",  es2 == dt_time(20, 0))
+    check("ext overnight finish", ef2 == dt_time(3, 0))
+    check("ext overnight pre in",  time_in_window(dt_time(21, 0), es2, ef2) is True)
+    check("ext overnight post in", time_in_window(dt_time(2, 30), es2, ef2) is True)
+    check("ext overnight mid out", time_in_window(dt_time(12, 0), es2, ef2) is False)
+    check("ext window none",       ext("", "06:00") == (None, None))
 
     # stop_duration / drive_mins
     check("stop_duration zero", approx(stop_duration(0),   ONSITE_MIN))
