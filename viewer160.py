@@ -7300,7 +7300,27 @@ class MainWindow(QMainWindow):
                 tf.addWidget(sep)
         add_timing_row("Setup time",   f"{int(ONSITE_MIN)} min / stop")
         add_timing_row("Pump rate",    f"{int(PUMP_RATE_LPM)} L / min")
-        add_timing_row("Volume limit", f"{VOL_LIMIT:,} L", add_sep=False)
+        add_timing_row("Volume limit", f"{VOL_LIMIT:,} L", add_sep=True)
+
+        # Regulatory milking buffer toggle
+        buf_row = QWidget(); buf_row.setStyleSheet("background:transparent;")
+        buf_hl  = QHBoxLayout(buf_row)
+        buf_hl.setContentsMargins(0, 0, 0, 0); buf_hl.setSpacing(4)
+        self._milking_buf_cb = QCheckBox("Reg. milking buffers")
+        self._milking_buf_cb.setFont(lbl_font)
+        self._milking_buf_cb.setStyleSheet("color:#555555; border:none;")
+        self._milking_buf_cb.setChecked(True)
+        self._milking_buf_cb.setToolTip(
+            "2 h before window (wash cycle) + 1 h after (cooling)\n"
+            "Uncheck to use raw milking windows only.")
+        self._milking_buf_val = QLabel("2h / 1h")
+        self._milking_buf_val.setFont(val_font)
+        self._milking_buf_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._milking_buf_val.setStyleSheet("color:#222222;")
+        buf_hl.addWidget(self._milking_buf_cb, stretch=1)
+        buf_hl.addWidget(self._milking_buf_val)
+        tf.addWidget(buf_row)
+        self._milking_buf_cb.toggled.connect(self._on_milking_buf_toggle)
         ll.addWidget(timing_frame)
 
         # Push everything below to the bottom
@@ -11834,6 +11854,18 @@ class MainWindow(QMainWindow):
         day_routes.sort(  key=lambda r: r["start_mins"])
         night_routes.sort(key=lambda r: r["start_mins"])
         return day_routes, night_routes, night_start_mins
+
+    def _on_milking_buf_toggle(self, checked):
+        """Enable or disable the regulatory milking-window buffers."""
+        global MILKING_PRE_BUFFER_MINS, MILKING_POST_BUFFER_MINS
+        MILKING_PRE_BUFFER_MINS  = 120.0 if checked else 0.0
+        MILKING_POST_BUFFER_MINS = 60.0  if checked else 0.0
+        self._milking_buf_val.setText("2h / 1h" if checked else "off")
+        self._milking_buf_val.setStyleSheet(
+            "color:#222222;" if checked else "color:#aaaaaa;")
+        self.statusBar().showMessage(
+            "Regulatory milking buffers " + ("enabled" if checked else "disabled"),
+            3000)
 
     def _on_truck_avail_visualize(self):
         """Open (or refresh) the TruckAvailDialog showing full route timelines."""
