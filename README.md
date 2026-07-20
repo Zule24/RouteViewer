@@ -1,7 +1,9 @@
 
-current ver: viewer216 
+current ver: viewer217
 
 ver history
+
+217: file structure overhaul
 
 216: optimizations
 
