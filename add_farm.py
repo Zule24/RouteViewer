@@ -1,5 +1,5 @@
 """
-add_farm.py  —  Add a new farm to the RouteViewer distance matrices
+add_farm.py  --  Add a new farm to the RouteViewer distance matrices
 ====================================================================
 
 Run with:  python add_farm.py
@@ -16,11 +16,11 @@ What it does
 5. Appends the new pairs to distance_matrix.csv and duration_matrix.csv.
 6. Appends the new farm's coordinates to extracted.xlsx so the registry stays current.
 
-Place the updated CSVs next to viewer160.exe — no rebuild required.
+Place the updated CSVs next to viewer160.exe -- no rebuild required.
 
-──────────────────────────────────────────────────────────────────────────────
-CONFIGURATION  ←  edit these if anything changes
-──────────────────────────────────────────────────────────────────────────────
+------------------------------------------------------------------------------
+CONFIGURATION  <-  edit these if anything changes
+------------------------------------------------------------------------------
 """
 
 # All files are expected in the same folder as this script.
@@ -34,10 +34,11 @@ COL_LON      = "C"                 # column: longitude (decimal degrees)
 # OSRM server. Change to your internal server address if needed.
 OSRM_HOST = "https://router.project-osrm.org"
 
-DIST_CSV = "distance_matrix.csv"   # road distances in km
-DUR_CSV  = "duration_matrix.csv"   # travel durations in minutes
+DIST_CSV   = "distance_matrix.csv"   # road distances in km
+DUR_CSV    = "duration_matrix.csv"   # travel durations in minutes
+ROUTES_DB  = "routes.db"             # map visualizer database
 
-# ── Nothing below this line normally needs changing ──────────────────────────
+# -- Nothing below this line normally needs changing --------------------------
 
 import csv
 import sys
@@ -61,10 +62,10 @@ except ImportError:
 HERE = Path(__file__).parent
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 def col_index(col):
-    """Column letter ('A', 'B', ...) or 1-based int → 1-based int."""
+    """Column letter ('A', 'B', ...) or 1-based int -> 1-based int."""
     if isinstance(col, int):
         return col
     idx = 0
@@ -79,7 +80,7 @@ COL_LON_I  = col_index(COL_LON)
 
 
 def normalise_key(k):
-    """Strip trailing .0 from integer-like floats ('14247.0' → '14247')."""
+    """Strip trailing .0 from integer-like floats ('14247.0' -> '14247')."""
     s = str(k).strip()
     if s.endswith(".0") and s[:-2].lstrip("-").isdigit():
         s = s[:-2]
@@ -88,7 +89,7 @@ def normalise_key(k):
 
 def load_coords(path):
     """
-    Load extracted.xlsx → {key: (lat, lon)}.
+    Load extracted.xlsx -> {key: (lat, lon)}.
     Skips rows where id, lat, or lon are missing.
     """
     path = Path(path)
@@ -124,7 +125,7 @@ def append_to_coords_excel(path, irma, lat, lon):
 
 
 def load_csv_matrix(path):
-    """Load a distance/duration CSV → (dict {(rk,ck): float}, ordered key list)."""
+    """Load a distance/duration CSV -> (dict {(rk,ck): float}, ordered key list)."""
     path = Path(path)
     dm, keys = {}, []
     if not path.exists():
@@ -181,7 +182,7 @@ def geocode(address):
 
 def osrm_table(new_lat, new_lon, existing_nodes):
     """
-    Query OSRM table API: new farm (source 0) → all existing nodes.
+    Query OSRM table API: new farm (source 0) -> all existing nodes.
     existing_nodes: [(key, lat, lon), ...]
     Returns (dist_km {key: float}, dur_min {key: float}).
     """
@@ -207,19 +208,117 @@ def osrm_table(new_lat, new_lon, existing_nodes):
     return dist_km, dur_min
 
 
-# ── GUI ───────────────────────────────────────────────────────────────────────
+def encode_geometry_straight(lat1, lon1, lat2, lon2):
+    """Encode a 2-point straight-line geometry as float32 lat/lon pairs."""
+    import struct
+    return struct.pack('<ffff', lat1, lon1, lat2, lon2)
+
+
+def encode_geometry_full(coordinates):
+    """Encode a GeoJSON coordinate list [[lon,lat],...] as float32 lat/lon pairs."""
+    import struct
+    data = bytearray()
+    for lon, lat in coordinates:
+        data += struct.pack('<ff', lat, lon)
+    return bytes(data)
+
+
+def fetch_route_geometry(origin_lon, origin_lat, dest_lon, dest_lat):
+    """Fetch full road-path geometry from OSRM for a single pair.
+    Returns list of [lon, lat] pairs, or None on failure.
+    """
+    url = (f"{OSRM_HOST}/route/v1/driving/"
+           f"{origin_lon},{origin_lat};{dest_lon},{dest_lat}"
+           f"?overview=full&geometries=geojson")
+    try:
+        resp = requests.get(url, headers={"User-Agent": "RouteViewerAdmin/1.0"}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") == "Ok":
+            return data["routes"][0]["geometry"]["coordinates"]
+    except Exception:
+        pass
+    return None
+
+
+def update_routes_db(db_path, irma, lat, lon, dist_km, dur_min, coords,
+                     full_geometry=False, log_fn=None):
+    """Insert new farm into routes.db locations and route pairs.
+
+    full_geometry=False (default): uses straight-line 2-point geometry.
+                                   Fast -- no extra OSRM requests needed.
+    full_geometry=True:            fetches actual road-path geometry from OSRM
+                                   for every pair. Accurate map display but
+                                   requires ~1 request per node (~3-5 min for
+                                   a full 341-node matrix).
+    """
+    import sqlite3, time
+    db_path = Path(db_path)
+    if not db_path.exists():
+        if log_fn:
+            log_fn(f"routes.db not found at {db_path} -- skipping map database update.\n")
+        return 0
+
+    conn = sqlite3.connect(db_path)
+    cur  = conn.cursor()
+
+    cur.execute("INSERT OR REPLACE INTO locations (irma, lat, lon) VALUES (?, ?, ?)",
+                (irma, lat, lon))
+
+    inserted  = 0
+    n_total   = len(dist_km)
+    for i, (key, d_km) in enumerate(dist_km.items()):
+        d_m = int(round(d_km * 1000))
+        d_s = int(round(dur_min.get(key, 0) * 60))
+        node_latlon = coords.get(key)
+        if node_latlon is None:
+            continue
+        nlat, nlon = node_latlon
+
+        if full_geometry:
+            if log_fn and i % 25 == 0:
+                log_fn(f"  Fetching geometry: {i}/{n_total} nodes...\n")
+            coords_fwd = fetch_route_geometry(lon,  lat,  nlon, nlat)
+            coords_rev = fetch_route_geometry(nlon, nlat, lon,  lat)
+            geom_fwd = encode_geometry_full(coords_fwd) if coords_fwd else encode_geometry_straight(lat,  lon,  nlat, nlon)
+            geom_rev = encode_geometry_full(coords_rev) if coords_rev else encode_geometry_straight(nlat, nlon, lat,  lon)
+            time.sleep(0.05)   # be polite to public OSRM server
+        else:
+            geom_fwd = encode_geometry_straight(lat,  lon,  nlat, nlon)
+            geom_rev = encode_geometry_straight(nlat, nlon, lat,  lon)
+
+        cur.execute(
+            "INSERT OR REPLACE INTO routes (origin, dest, distance_m, duration_s, geometry) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (irma, key, d_m, d_s, geom_fwd))
+        cur.execute(
+            "INSERT OR REPLACE INTO routes (origin, dest, distance_m, duration_s, geometry) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (key, irma, d_m, d_s, geom_rev))
+        inserted += 1
+
+    new_count = conn.execute("SELECT COUNT(*) FROM locations").fetchone()[0]
+    cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('location_count', ?)",
+                (str(new_count),))
+
+    conn.commit()
+    conn.close()
+    return inserted
+
+
+# -- GUI -----------------------------------------------------------------------
 
 class AddFarmApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("RouteViewer — Add Farm")
+        self.title("RouteViewer -- Add Farm")
         self.minsize(640, 560)
         self.resizable(True, True)
         self._coords_cache = None
         self._build_ui()
 
-    # ── Layout ────────────────────────────────────────────────────────────────
+    # -- Layout ----------------------------------------------------------------
 
     def _build_ui(self):
         P = {"padx": 10, "pady": 4}
@@ -227,9 +326,10 @@ class AddFarmApp(tk.Tk):
         # File paths
         fp = ttk.LabelFrame(self, text="File Paths")
         fp.pack(fill="x", **P)
-        self._coords_var = self._file_row(fp, "Coordinates Excel:", COORDS_EXCEL, 0)
-        self._dist_var   = self._file_row(fp, "distance_matrix.csv:", DIST_CSV, 1)
-        self._dur_var    = self._file_row(fp, "duration_matrix.csv:", DUR_CSV, 2)
+        self._coords_var  = self._file_row(fp, "Coordinates Excel:", COORDS_EXCEL, 0)
+        self._dist_var    = self._file_row(fp, "distance_matrix.csv:", DIST_CSV, 1)
+        self._dur_var     = self._file_row(fp, "duration_matrix.csv:", DUR_CSV, 2)
+        self._routes_var  = self._file_row(fp, "routes.db:", ROUTES_DB, 3)
         fp.columnconfigure(1, weight=1)
 
         # Farm details
@@ -249,16 +349,31 @@ class AddFarmApp(tk.Tk):
         ttk.Entry(ll, textvariable=self._lat_var, width=16).pack(side="left")
         ttk.Label(ll, text="  Longitude:").pack(side="left")
         ttk.Entry(ll, textvariable=self._lon_var, width=16).pack(side="left", padx=(4, 0))
-        ttk.Button(ll, text="⌖ Geocode address →",
+        ttk.Button(ll, text="Geocode address",
                    command=self._geocode).pack(side="left", padx=(12, 0))
+
+        # Geometry mode
+        gf = ttk.LabelFrame(self, text="Map Route Geometry")
+        gf.pack(fill="x", **P)
+        self._full_geom_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            gf, variable=self._full_geom_var,
+            text="Fetch full road-path geometry  (accurate map display)").pack(
+            side="left", padx=8, pady=4)
+        self._geom_warning = ttk.Label(
+            gf,
+            text="(!)  Requires ~1 OSRM request per existing node -- may take 3-5 minutes",
+            foreground="#b85000")
+        # warning label shown/hidden by checkbox
+        self._full_geom_var.trace_add("write", self._on_geom_toggle)
 
         # Buttons
         bf = ttk.Frame(self)
         bf.pack(fill="x", **P)
-        self._add_btn = ttk.Button(bf, text="✚  Compute & Add Farm",
+        self._add_btn = ttk.Button(bf, text="Compute & Add Farm",
                                    command=self._start_add)
         self._add_btn.pack(side="left", padx=4)
-        ttk.Button(bf, text="⟳  Reload coordinate list",
+        ttk.Button(bf, text="Reload coordinate list",
                    command=self._reload_coords).pack(side="left", padx=4)
         self._status = ttk.Label(bf, text="", foreground="#555")
         self._status.pack(side="left", padx=12)
@@ -274,6 +389,7 @@ class AddFarmApp(tk.Tk):
             f"Coordinates file : {HERE / COORDS_EXCEL}\n"
             f"Distance matrix  : {HERE / DIST_CSV}\n"
             f"Duration matrix  : {HERE / DUR_CSV}\n"
+            f"Routes DB        : {HERE / ROUTES_DB}\n"
         )
 
     def _file_row(self, parent, label, default, row):
@@ -281,7 +397,7 @@ class AddFarmApp(tk.Tk):
         var = tk.StringVar(value=str(HERE / default))
         ttk.Entry(parent, textvariable=var, width=50).grid(
             row=row, column=1, sticky="ew", padx=6)
-        ttk.Button(parent, text="…",
+        ttk.Button(parent, text="...",
                    command=lambda v=var: v.set(filedialog.askopenfilename() or v.get())
                    ).grid(row=row, column=2, padx=4)
         return var
@@ -293,7 +409,7 @@ class AddFarmApp(tk.Tk):
             row=row, column=1, sticky="ew", padx=6)
         return var
 
-    # ── Logging / status ──────────────────────────────────────────────────────
+    # -- Logging / status ------------------------------------------------------
 
     def _log_write(self, msg):
         self._log.configure(state="normal")
@@ -306,25 +422,25 @@ class AddFarmApp(tk.Tk):
         self._status.configure(text=msg, foreground=color)
         self.update_idletasks()
 
-    # ── Geocoding ─────────────────────────────────────────────────────────────
+    # -- Geocoding -------------------------------------------------------------
 
     def _geocode(self):
         address = self._address_var.get().strip()
         if not address:
             messagebox.showwarning("No address", "Enter an address first.")
             return
-        self._set_status("Geocoding…")
+        self._set_status("Geocoding...")
         try:
             lat, lon = geocode(address)
             self._lat_var.set(f"{lat:.6f}")
             self._lon_var.set(f"{lon:.6f}")
-            self._log_write(f"Geocoded '{address}' → {lat:.6f}, {lon:.6f}\n")
+            self._log_write(f"Geocoded '{address}' -> {lat:.6f}, {lon:.6f}\n")
             self._set_status(f"Geocoded: {lat:.6f}, {lon:.6f}", "#1a7a1a")
         except Exception as exc:
             self._set_status(f"Geocode failed: {exc}", "red")
             self._log_write(f"ERROR geocoding: {exc}\n")
 
-    # ── Coordinate list ───────────────────────────────────────────────────────
+    # -- Coordinate list -------------------------------------------------------
 
     def _reload_coords(self):
         self._coords_cache = None
@@ -333,7 +449,7 @@ class AddFarmApp(tk.Tk):
     def _load_coords(self):
         if self._coords_cache is not None:
             return self._coords_cache
-        self._set_status("Loading coordinates…")
+        self._set_status("Loading coordinates...")
         try:
             self._coords_cache = load_coords(self._coords_var.get())
             self._log_write(f"Loaded {len(self._coords_cache)} nodes from coordinates file.\n")
@@ -344,7 +460,13 @@ class AddFarmApp(tk.Tk):
             self._coords_cache = {}
         return self._coords_cache
 
-    # ── Main action ───────────────────────────────────────────────────────────
+    def _on_geom_toggle(self, *_):
+        if self._full_geom_var.get():
+            self._geom_warning.pack(side="left", padx=(0, 8))
+        else:
+            self._geom_warning.pack_forget()
+
+    # -- Main action -----------------------------------------------------------
 
     def _start_add(self):
         irma  = normalise_key(self._irma_var.get().strip())
@@ -366,7 +488,7 @@ class AddFarmApp(tk.Tk):
             return
 
         self._add_btn.configure(state="disabled")
-        self._set_status("Working…")
+        self._set_status("Working...")
         Thread(target=self._run, args=(irma, lat, lon), daemon=True).start()
 
     def _run(self, irma, lat, lon):
@@ -379,14 +501,14 @@ class AddFarmApp(tk.Tk):
             self.after(0, lambda: self._add_btn.configure(state="normal"))
 
     def _do_add(self, irma, lat, lon):
-        self.after(0, lambda: self._log_write(f"\n{'─'*60}\n"))
+        self.after(0, lambda: self._log_write(f"\n{'-'*60}\n"))
         self.after(0, lambda: self._log_write(
             f"Adding:  {irma}  ({lat:.6f}, {lon:.6f})\n"))
 
         # Load coordinates
         coords = self._load_coords()
         if not coords:
-            raise RuntimeError("No node coordinates loaded — cannot compute distances.")
+            raise RuntimeError("No node coordinates loaded -- cannot compute distances.")
 
         if irma in coords:
             confirmed = [False]
@@ -408,8 +530,8 @@ class AddFarmApp(tk.Tk):
         # OSRM query
         existing = [(k, v[0], v[1]) for k, v in coords.items() if k != irma]
         self.after(0, lambda: self._log_write(
-            f"Querying OSRM ({len(existing)} nodes)…\n"))
-        self.after(0, lambda: self._set_status("Querying OSRM…"))
+            f"Querying OSRM ({len(existing)} nodes)...\n"))
+        self.after(0, lambda: self._set_status("Querying OSRM..."))
 
         dist_km, dur_min = osrm_table(lat, lon, existing)
 
@@ -423,7 +545,7 @@ class AddFarmApp(tk.Tk):
                                "Check server URL and coordinates.")
 
         # Update CSVs
-        self.after(0, lambda: self._set_status("Updating CSVs…"))
+        self.after(0, lambda: self._set_status("Updating CSVs..."))
 
         dm_dist, dist_keys = load_csv_matrix(self._dist_var.get())
         dm_dur,  dur_keys  = load_csv_matrix(self._dur_var.get())
@@ -442,29 +564,43 @@ class AddFarmApp(tk.Tk):
         dist_path = Path(self._dist_var.get())
         dur_path  = Path(self._dur_var.get())
 
-        self.after(0, lambda: self._log_write(f"Writing {dist_path.name}…\n"))
+        self.after(0, lambda: self._log_write(f"Writing {dist_path.name}...\n"))
         write_csv_matrix(dist_path, dm_dist, all_keys)
-        self.after(0, lambda: self._log_write(f"Writing {dur_path.name}…\n"))
+        self.after(0, lambda: self._log_write(f"Writing {dur_path.name}...\n"))
         write_csv_matrix(dur_path, dm_dur, all_keys)
+
+        # Update routes.db map database
+        full_geom = self._full_geom_var.get()
+        if full_geom:
+            self.after(0, lambda: self._log_write(
+                "Fetching full road geometry -- this may take 3-5 minutes...\n"))
+        n_routes = update_routes_db(
+            self._routes_var.get(), irma, lat, lon,
+            dist_km, dur_min, coords,
+            full_geometry=full_geom,
+            log_fn=lambda m: self.after(0, lambda msg=m: self._log_write(msg)))
+        if n_routes:
+            self.after(0, lambda n=n_routes: self._log_write(
+                f"Updated routes.db: {n} route pairs inserted.\n"))
 
         # Append to extracted.xlsx
         coords_path = Path(self._coords_var.get())
         if irma not in coords:
-            self.after(0, lambda: self._log_write(f"Updating {coords_path.name}…\n"))
+            self.after(0, lambda: self._log_write(f"Updating {coords_path.name}...\n"))
             append_to_coords_excel(coords_path, irma, lat, lon)
             # Invalidate cache so next add sees the new farm
             self._coords_cache = None
 
         summary = (
-            f"\n✓  Done!  Farm {irma} added.\n"
+            f"\nOK  Done!  Farm {irma} added.\n"
             f"   Pairs computed : {routed}\n"
-            f"   Matrix size    : {len(all_keys)} × {len(all_keys)} nodes\n"
+            f"   Matrix size    : {len(all_keys)} x {len(all_keys)} nodes\n"
             f"\n   Copy the updated CSVs and extracted.xlsx next to viewer160.exe\n"
-            f"   and relaunch — no rebuild required.\n"
+            f"   and relaunch -- no rebuild required.\n"
         )
         self.after(0, lambda: self._log_write(summary))
         self.after(0, lambda: self._set_status(
-            f"✓  Farm {irma} added ({routed} pairs)", "#1a7a1a"))
+            f"OK  Farm {irma} added ({routed} pairs)", "#1a7a1a"))
 
 
 if __name__ == "__main__":
