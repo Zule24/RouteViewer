@@ -753,6 +753,39 @@ def _is_fixed_vol_block(block):
     return dests[-1].get("vol_partial") is not None
 
 
+# Litres assumed on a depot->processor preload leg when the workbook does not
+# state an explicit volume.  A preload is milk picked up on a previous night and
+# carried to the processor at the start of the shift.
+PRELOAD_ASSUMED_VOL = 40000.0
+
+
+def _block_is_preload_delivery(block):
+    """True if this block is a depot->processor delivery with no farm pickups.
+
+    Two ways to qualify:
+      * the parser set the explicit 'preload' flag, or
+      * the block picks up nothing yet still delivers to a destination - so
+        whatever it drops off must have been loaded on a previous shift.
+
+    IMPORTANT: only meaningful against ORIGINAL workbook data.  During the
+    search the route-elimination move strips farms out of blocks, which would
+    make an ordinary pickup block look delivery-only.  See
+    ALNSSolver._compute_preload_sheets.
+    """
+    if block.get("preload"):
+        return True
+    if block.get("rows"):
+        return False
+    return bool(_block_dest_keys(block))
+
+
+# Default minimum litres for either half of a split pickup.  A farm (or an
+# existing split part) is only splittable when its volume is at least twice
+# this, and neither resulting half may fall below it - avoids pointless tiny
+# partial pickups.  Overridable per-run via cfg["split_min_vol"].
+SPLIT_MIN_VOL = 3000.0
+
+
 def calc_distances(blocks, dm):
     """
     Routing rules (multi-destination aware, split_after supported):
@@ -3572,6 +3605,45 @@ class ALNSSolver(QThread):
         # Accumulated across all colour groups during run(); read by MainWindow
         # after solving for logging paired trailers held with their lead.
         self.paired_followers = []   # (sname, b_idx, lead_uid, follower_dict, order)
+        # Routes cleared of all farms by the split feature, as (colour, sname).
+        # Surfaced to the user after the run so they know which trucks the
+        # solver managed to take off the road.
+        self.eliminated_routes = []
+        # {sname: preload litres} snapshotted from the ORIGINAL workbook before
+        # any searching, so mid-search block emptying can't be mistaken for a
+        # preload.  A route on this list can never be reported as eliminated.
+        self._preload_sheets = self._compute_preload_sheets()
+
+    def _compute_preload_sheets(self):
+        """Identify sheets carrying a depot->processor preload, from the
+        ORIGINAL workbook data, as the solver starts.
+
+        A preload is a delivery of milk picked up on a previous night.  The
+        truck still has to run that leg to the processor, so the route is NOT
+        eliminated even if every farm is moved off it - it just becomes a
+        delivery-only route.  Volume is taken from the workbook's explicit
+        partial volumes when present, else assumed PRELOAD_ASSUMED_VOL.
+
+        Returns {sheet_name: litres}.
+        """
+        out = {}
+        sheets = self.cache.get(self.fname) or {}
+        for sname, entry in sheets.items():
+            if not isinstance(entry, dict):
+                continue
+            vol = 0.0
+            for b in entry.get("blocks", []) or []:
+                if not _block_is_preload_delivery(b):
+                    continue
+                stated = 0.0
+                for d in (b.get("dests") or []):
+                    vp = d.get("vol_partial")
+                    if isinstance(vp, (int, float)):
+                        stated += float(vp)
+                vol += stated if stated > 0 else PRELOAD_ASSUMED_VOL
+            if vol > 0:
+                out[sname] = vol
+        return out
 
     def stop(self):
         self._stop = True
@@ -3778,6 +3850,422 @@ class ALNSSolver(QThread):
         shortage = max(0, needed - on_time)
         return shortage * pen_rate
 
+    def _route_fixed_penalty(self, state):
+        """Fixed km-equivalent cost charged per ACTIVE route (sheet).
+
+        A sheet is "active" when at least one of its blocks still carries a
+        farm.  Emptying a route of all farms drops its fixed cost entirely -
+        this is the incentive that makes the solver willing to run a couple of
+        routes less efficiently if doing so lets it clear another route
+        completely.  Off by default: cfg["route_fixed_cost"] <= 0 returns 0,
+        so behaviour is unchanged unless the split feature turns it on.
+
+        When every sheet always has farms this is a constant offset (it adds
+        the same amount to every candidate state) and therefore has no effect
+        on the search - it only starts to bite once a route can actually reach
+        zero farms.
+        """
+        rate = self.cfg.get("route_fixed_cost", 0.0)
+        if rate <= 0:
+            return 0.0
+        active = 0
+        for sname, blocks in state:
+            # A preload route always runs: even with no farms the truck must
+            # still deliver the previous night's load, so it can never be
+            # saved.  Counting it as active stops the solver chasing a phantom
+            # reward for stripping the farms off it.
+            if any(b.get("rows") for b in blocks) or sname in self._preload_sheets:
+                active += 1
+        return active * rate
+
+    def _split_farm(self, state):
+        """SPLIT move: divide one farm's volume into two partial pickups that
+        ride on two different routes.
+
+        The farm is a single physical location, so a split means two trucks
+        each call at that farm and take part of the load.  This lets the solver
+        distribute a farm's volume across trucks that are individually near
+        capacity, which is what makes it possible to clear the farms off a
+        marginal route entirely (see _route_fixed_penalty).
+
+        Only enabled when cfg["allow_split"] is set - this method is never
+        reached otherwise, so the default search is untouched.
+
+        Returns (new_state, changed_snames).  If no eligible farm or nowhere to
+        place the second half, returns an unchanged copy (a no-op the SA loop
+        harmlessly "accepts" at zero delta).
+        """
+        min_vol = self.cfg.get("split_min_vol", SPLIT_MIN_VOL)
+
+        cand = []
+        for s_idx, (sname, blocks) in enumerate(state):
+            for b_idx, block in enumerate(blocks):
+                if _is_preload_block(block) or _is_fixed_vol_block(block):
+                    continue
+                for f_idx, farm in enumerate(block["rows"]):
+                    if farm.get("_split_lock"):
+                        continue   # trailer-pair lead - held as one unit
+                    v = farm.get("prior_vol")
+                    if isinstance(v, (int, float)) and v >= 2 * min_vol:
+                        cand.append((s_idx, b_idx, f_idx))
+        if not cand:
+            return _copy_state(state), set()
+
+        s_idx, b_idx, f_idx = random.choice(cand)
+        new_state = _copy_state(state)
+        farm = new_state[s_idx][1][b_idx]["rows"][f_idx]
+        full = float(farm.get("prior_vol") or 0)
+
+        lo = min_vol
+        hi = full - min_vol
+        if hi <= lo:
+            return new_state, set()
+        part2_vol = random.uniform(lo, hi)
+        part1_vol = full - part2_vol
+
+        # Build the second half as a trial dict and find the cheapest OTHER
+        # eligible route for it BEFORE mutating the original - so an aborted
+        # split leaves the state (and the farm's volume) untouched.
+        part2 = dict(farm)
+        part2["_uid"]      = str(uuid.uuid4())
+        part2["prior_vol"] = part2_vol
+
+        start_map = {}
+        for sn, _blks in new_state:
+            entry = self.cache.get(self.fname, {}).get(sn, {})
+            start_map[sn] = entry.get("start_time") if isinstance(entry, dict) else None
+
+        lock = self.cfg.get("day_night_lock", False)
+        src_sname  = new_state[s_idx][0]
+        src_is_day = _is_day_sheet(start_map.get(src_sname)) if lock else None
+
+        best = None   # (cost, s2, b2, pos)
+        for s2, (sn2, blks2) in enumerate(new_state):
+            if s2 == s_idx:
+                continue   # must land on a different route to be a real split
+            if start_map.get(sn2) is None:
+                continue
+            if lock and _is_day_sheet(start_map.get(sn2)) != src_is_day:
+                continue
+            b2, pos, c = self._best_insert_cost(
+                blks2, part2, self.dm, shift_start=start_map[sn2],
+                dm_dur=self.dm_dur)
+            if b2 is not None and (best is None or c < best[0]):
+                best = (c, s2, b2, pos)
+        if best is None:
+            return new_state, set()   # nowhere to place the second half
+
+        # Commit.  IMPORTANT: _copy_state SHARES farm dicts between state
+        # copies (rows are treated as immutable - see _copy_blocks), so we must
+        # NOT edit `farm` in place; doing so would corrupt every other state
+        # that shares this row, including earlier best_state snapshots.  Instead
+        # replace the row in this state's (already-copied) rows list with a
+        # fresh dict carrying the reduced volume.
+        grp      = farm.get("_split_group") or farm.get("_uid") or str(uuid.uuid4())
+        full_ref = farm.get("_split_full_vol", full)
+        part1 = dict(farm, prior_vol=part1_vol,
+                     _split_group=grp, _split_full_vol=full_ref)
+        new_state[s_idx][1][b_idx]["rows"][f_idx] = part1
+        part2["_split_group"]    = grp
+        part2["_split_full_vol"] = full_ref
+
+        _, s2, b2, pos = best
+        new_state[s2][1][b2]["rows"].insert(pos, part2)
+        return new_state, {new_state[s_idx][0], new_state[s2][0]}
+
+    def _merge_split(self, state):
+        """MERGE move: recombine every part of one split group back into a
+        single full-volume pickup, dropping the redundant stops.  Lets the SA
+        loop back out of a split that did not pay off.
+
+        Returns (new_state, changed_snames)."""
+        groups = {}
+        for _s_idx, (_sname, blocks) in enumerate(state):
+            for block in blocks:
+                for farm in block["rows"]:
+                    g = farm.get("_split_group")
+                    if g:
+                        groups.setdefault(g, 0)
+                        groups[g] += 1
+        mergeable = [g for g, n in groups.items() if n >= 2]
+        if not mergeable:
+            return _copy_state(state), set()
+        g = random.choice(mergeable)
+
+        new_state = _copy_state(state)
+        parts = []
+        for s_idx, (_sname, blocks) in enumerate(new_state):
+            for b_idx, block in enumerate(blocks):
+                for f_idx, farm in enumerate(block["rows"]):
+                    if farm.get("_split_group") == g:
+                        parts.append((s_idx, b_idx, f_idx, farm))
+        if len(parts) < 2:
+            return new_state, set()
+
+        total = sum(float(p[3].get("prior_vol") or 0) for p in parts)
+        keep_s, keep_b, keep_f, keep_farm = parts[0]
+        # Replace (don't mutate) the kept row - rows are shared across state
+        # copies, so in-place edits would corrupt other snapshots.
+        merged = dict(keep_farm, prior_vol=total)
+        merged.pop("_split_group", None)
+        merged.pop("_split_full_vol", None)
+        new_state[keep_s][1][keep_b]["rows"][keep_f] = merged
+        changed = {new_state[keep_s][0]}
+
+        # Delete the surplus parts high-index-first so earlier indices (and the
+        # kept part's position) stay valid.
+        for s_idx, b_idx, f_idx, _f in sorted(parts[1:],
+                                              key=lambda p: (p[0], p[1], p[2]),
+                                              reverse=True):
+            del new_state[s_idx][1][b_idx]["rows"][f_idx]
+            changed.add(new_state[s_idx][0])
+        return new_state, changed
+
+    @staticmethod
+    def _merge_same_block_splits(state):
+        """Collapse split parts that ended up in the SAME block back into one
+        pickup - a truck calling at a farm twice for two partial loads is
+        pointless.  Runs as a cleanup pass on the final state.  Mutates in
+        place and returns the state."""
+        for _sname, blocks in state:
+            for block in blocks:
+                rows  = block.get("rows", [])
+                bygrp = {}
+                for f_idx, farm in enumerate(rows):
+                    g = farm.get("_split_group")
+                    if g:
+                        bygrp.setdefault(g, []).append(f_idx)
+                drop = set()
+                for _g, idxs in bygrp.items():
+                    if len(idxs) < 2:
+                        continue
+                    keep  = idxs[0]
+                    extra = sum(float(rows[i].get("prior_vol") or 0)
+                                for i in idxs[1:])
+                    # Replace (don't mutate) - rows are shared across snapshots.
+                    rows[keep] = dict(
+                        rows[keep],
+                        prior_vol=float(rows[keep].get("prior_vol") or 0) + extra)
+                    drop.update(idxs[1:])
+                if drop:
+                    block["rows"] = [r for i, r in enumerate(rows)
+                                     if i not in drop]
+        return state
+
+    def _repair_split_pack(self, state, removed, exclude=frozenset()):
+        """Redistribute `removed` farms across routes, SPLITTING a farm when it
+        will not fit under the hard cap on any single route.
+
+        This is the packing engine behind the route-elimination move: a whole
+        route's worth of farms has to be absorbed by trucks that are each
+        already near capacity, which is only possible by breaking some farms
+        into partial pickups.  Farms are placed largest-first; each is filled
+        into the cheapest route with real headroom, spilling the remainder onto
+        further routes.  Volume is always conserved - a final remainder that
+        fits nowhere under cap is placed whole (accepting an overflow penalty)
+        rather than dropped.
+
+        exclude: sheet names that must NOT receive farms (the route being
+        emptied), so it actually ends up cleared.
+
+        Returns (new_state, 0)  [second value kept for signature parity with the
+        other repair operators].
+        """
+        state    = _copy_state(state)
+        min_vol  = self.cfg.get("split_min_vol", SPLIT_MIN_VOL)
+        hard_cap = self.cfg.get("hard_vol_cap", HARD_CAP)
+        lock     = self.cfg.get("day_night_lock", False)
+
+        start_map = {}
+        for sn, _blks in state:
+            entry = self.cache.get(self.fname, {}).get(sn, {})
+            start_map[sn] = entry.get("start_time") if isinstance(entry, dict) else None
+
+        def _rvol(blocks):
+            return sum((f.get("prior_vol") or 0)
+                       for b in blocks for f in b["rows"]
+                       if isinstance(f.get("prior_vol"), (int, float)))
+
+        def _day(sn):
+            return _is_day_sheet(start_map.get(sn))
+
+        def _eligible(sn, origin_day):
+            if sn in exclude or start_map.get(sn) is None:
+                return False
+            if lock and origin_day is not None and _day(sn) != origin_day:
+                return False
+            return True
+
+        def _place(farm_template, piece, origin_day, grp, full):
+            """Insert one piece; return True if placed."""
+            best = None
+            for s_idx, (sn, blocks) in enumerate(state):
+                if not _eligible(sn, origin_day):
+                    continue
+                trial = dict(farm_template, prior_vol=piece)
+                b2, pos, c = self._best_insert_cost(
+                    blocks, trial, self.dm,
+                    shift_start=start_map[sn], dm_dur=self.dm_dur)
+                if b2 is not None and (best is None or c < best[0]):
+                    best = (c, s_idx, b2, pos)
+            if best is None:
+                return False
+            _c, s_idx, b2, pos = best
+            nf = dict(farm_template)
+            nf["_uid"]      = str(uuid.uuid4())
+            nf["prior_vol"] = piece
+            if grp is not None:
+                nf["_split_group"]    = grp
+                nf["_split_full_vol"] = full
+            state[s_idx][1][b2]["rows"].insert(pos, nf)
+            return True
+
+        def _rvol_key(item):
+            f = item[2]; v = f.get("prior_vol")
+            return v if isinstance(v, (int, float)) else 0.0
+
+        for s_hint, _b_hint, farm in sorted(removed, key=_rvol_key, reverse=True):
+            orig_vol = farm.get("prior_vol")
+            # Real workbooks carry farms whose prior_vol is a non-numeric marker
+            # (e.g. "XXX" for no pickup).  Those are placed whole with their
+            # marker preserved - never coerced to a number or split.
+            full = float(orig_vol) if isinstance(orig_vol, (int, float)) else 0.0
+            origin_day = (_day(state[s_hint][0])
+                          if (lock and s_hint < len(state)) else None)
+            grp = farm.get("_split_group") or farm.get("_uid") or str(uuid.uuid4())
+
+            # Non-numeric or too small to split meaningfully: move whole,
+            # keeping the original prior_vol value intact.
+            if full < 2 * min_vol:
+                if not _place(farm, orig_vol, origin_day, None, None):
+                    # nowhere eligible at all - fall back to any non-frozen block
+                    self._place_anywhere(state, farm, orig_vol, exclude, start_map)
+                continue
+
+            remaining   = full
+            placed_any  = False
+            guard       = 0
+            while remaining >= min_vol and guard < 16:
+                guard += 1
+                # cheapest route whose headroom can take at least min_vol
+                best = None
+                for s_idx, (sn, blocks) in enumerate(state):
+                    if not _eligible(sn, origin_day):
+                        continue
+                    head = hard_cap - _rvol(blocks)
+                    if head < min_vol:
+                        continue
+                    piece = min(remaining, head)
+                    trial = dict(farm, prior_vol=piece)
+                    b2, pos, c = self._best_insert_cost(
+                        blocks, trial, self.dm,
+                        shift_start=start_map[sn], dm_dur=self.dm_dur)
+                    if b2 is not None and (best is None or c < best[0]):
+                        best = (c, s_idx, b2, pos, piece)
+                if best is None:
+                    break
+                _c, s_idx, b2, pos, piece = best
+                nf = dict(farm)
+                nf["_uid"]            = str(uuid.uuid4())
+                nf["prior_vol"]       = piece
+                nf["_split_group"]    = grp
+                nf["_split_full_vol"] = full
+                state[s_idx][1][b2]["rows"].insert(pos, nf)
+                remaining  -= piece
+                placed_any  = True
+
+            if remaining > 1e-6:
+                # Leftover (a sub-min sliver, or the whole farm if nothing had
+                # room): place whole on the least-bad route, overflow allowed.
+                grp_r = grp if placed_any else None
+                if not _place(farm, remaining, origin_day, grp_r, full):
+                    self._place_anywhere(state, farm, remaining, exclude,
+                                         start_map, grp=grp_r, full=full)
+        return state, 0
+
+    def _place_anywhere(self, state, farm, vol, exclude, start_map,
+                        grp=None, full=None):
+        """Last-resort placement that never drops volume: drop the farm on the
+        first non-excluded sheet's last non-frozen block."""
+        for s_idx, (sn, blocks) in enumerate(state):
+            if sn in exclude or start_map.get(sn) is None:
+                continue
+            tb = None
+            for bi, bb in enumerate(blocks):
+                if not (_is_preload_block(bb) or _is_fixed_vol_block(bb)):
+                    tb = bi
+            if tb is None:
+                continue
+            nf = dict(farm)
+            nf["_uid"]      = str(uuid.uuid4())
+            nf["prior_vol"] = vol
+            if grp is not None:
+                nf["_split_group"]    = grp
+                nf["_split_full_vol"] = full
+            blocks[tb]["rows"].append(nf)
+            return True
+        return False
+
+    def _eliminate_route(self, state):
+        """ELIMINATE move: try to clear one whole route of farms in a single
+        step, splitting farms as needed so the remaining trucks can absorb the
+        load under cap.  This is what actually lets the route-elimination value
+        pay off - it presents "empty this truck and redistribute" as one SA
+        move, instead of relying on the annealer to stumble up a long hill of
+        individually-worse farm moves.
+
+        Targets one of the lightest routes (fewest farms, then least volume)
+        for diversity.  Only reached when cfg["allow_split"] is on.
+
+        Returns (new_state, changed_snames).
+        """
+        cand = []
+        for s_idx, (sname, blocks) in enumerate(state):
+            entry = self.cache.get(self.fname, {}).get(sname, {})
+            st    = entry.get("start_time") if isinstance(entry, dict) else None
+            if st is None:
+                continue
+            # A route carrying a preload still has to drive that previous
+            # night's load to the processor, so emptying it of farms does NOT
+            # take the truck off the road - never target it for elimination.
+            if sname in self._preload_sheets:
+                continue
+            frozen  = False
+            movable = 0
+            for b in blocks:
+                if _is_preload_block(b) or _is_fixed_vol_block(b):
+                    if b.get("rows"):
+                        frozen = True   # can't fully empty a route with frozen load
+                else:
+                    movable += len(b.get("rows", []))
+            if frozen or movable == 0:
+                continue
+            vol = sum((f.get("prior_vol") or 0)
+                      for b in blocks for f in b["rows"]
+                      if isinstance(f.get("prior_vol"), (int, float)))
+            cand.append((movable, vol, s_idx, sname))
+        if not cand:
+            return _copy_state(state), set()
+
+        cand.sort()   # lightest first
+        _mv, _vol, s_idx, target = random.choice(cand[:min(3, len(cand))])
+
+        new_state = _copy_state(state)
+        removed   = []
+        for b_idx, block in enumerate(new_state[s_idx][1]):
+            if _is_preload_block(block) or _is_fixed_vol_block(block):
+                continue
+            for farm in block["rows"]:
+                removed.append((s_idx, b_idx, dict(farm)))
+            block["rows"] = []
+        if not removed:
+            return new_state, set()
+
+        new_state, _ = self._repair_split_pack(new_state, removed,
+                                               exclude={target})
+        changed = {sn for sn, _ in new_state}   # many sheets touched
+        return new_state, changed
+
     def _group_cost(self, state, orig_dest_vols, sheet_cost_cache=None):
         """Full cost: sum per-sheet costs + group-wide volume penalty.
 
@@ -3799,6 +4287,7 @@ class ALNSSolver(QThread):
         total += _group_vol_penalty(state, orig_dest_vols, self.cfg)
         total += self._group_overlap_penalty(state)
         total += self._truck_avail_penalty(state)
+        total += self._route_fixed_penalty(state)
         return total
 
     def _make_sheet_cost_cache(self, state):
@@ -4745,7 +5234,9 @@ class ALNSSolver(QThread):
                     have_followers = False
                     while (j < len(rows)
                            and rows[j].get("irma", "") == lead_irma
-                           and lead_irma != ""):
+                           and lead_irma != ""
+                           and not rows[j].get("_split_group")
+                           and not lead.get("_split_group")):
                         have_followers = True
                         follower = copy.deepcopy(rows[j])
                         fv = follower.get("prior_vol")
@@ -4765,6 +5256,11 @@ class ALNSSolver(QThread):
                         if lead_uid is not None:
                             lead_orig_vol[lead_uid] = lead.get("prior_vol")
                         lead_copy["prior_vol"] = lv + folded_vol
+                        # A trailer-pair lead carries its followers' folded
+                        # volume and must stay one indivisible unit - never let
+                        # the split move break it up.
+                        if self.cfg.get("allow_split", False):
+                            lead_copy["_split_lock"] = True
                         new_rows.append(lead_copy)
                     else:
                         new_rows.append(lead)
@@ -4864,7 +5360,7 @@ class ALNSSolver(QThread):
 
         best_state = _copy_state(state)
         cur_sheet_cache  = self._make_sheet_cost_cache(state)
-        best_cost  = sum(cur_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(state) - frozen_cost_offset
+        best_cost  = sum(cur_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(state) + self._route_fixed_penalty(state) - frozen_cost_offset
         cur_cost   = best_cost
 
         cost_no_win = sum(
@@ -4924,6 +5420,25 @@ class ALNSSolver(QThread):
             "2opt":     0.5,   # intra-block only - useful but deprioritised
             "or_opt":   0.5,
         }
+
+        # Partial-pickup (split) moves are appended only when the feature is on,
+        # so the default search draws the identical operator/RNG stream it did
+        # before - split off => bit-for-bit unchanged behaviour.  "split"
+        # divides a farm's volume across two routes; "merge" undoes it.
+        allow_split = self.cfg.get("allow_split", False)
+        if allow_split:
+            move_scores["split"] = 1.5
+            move_scores["merge"] = 0.75
+            MOVE_FLOORS["split"] = 0.08
+            MOVE_FLOORS["merge"] = 0.04
+            # The route-elimination move only makes sense when clearing a route
+            # is actually rewarded.  Give it a solid floor so it is tried
+            # regularly - emptying a truck is the whole objective here and it
+            # needs enough attempts to find a redistribution the annealer will
+            # accept.
+            if self.cfg.get("route_fixed_cost", 0.0) > 0:
+                move_scores["elim"] = 2.0
+                MOVE_FLOORS["elim"] = 0.12
 
         # Farm sub-operator scores
         d_scores = {"random": 1.0, "worst": 1.0}
@@ -5025,6 +5540,15 @@ class ALNSSolver(QThread):
                     if blocks != state[s_idx][1]:
                         changed_sheets.add(sn)
 
+            elif move_type == "split":
+                new_state, changed_sheets = self._split_farm(state)
+
+            elif move_type == "merge":
+                new_state, changed_sheets = self._merge_split(state)
+
+            elif move_type == "elim":
+                new_state, changed_sheets = self._eliminate_route(state)
+
             else:  # combined
                 d_op = self._roulette(d_scores, min_prob=OP_MIN_PROB)
                 r_op = self._roulette(r_scores, min_prob=OP_MIN_PROB)
@@ -5056,7 +5580,7 @@ class ALNSSolver(QThread):
                     entry = self.cache[self.fname].get(sn, {})
                     st    = entry.get("start_time") if isinstance(entry, dict) else None
                     new_sheet_cache[sn] = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
-            new_cost = sum(new_sheet_cache.values()) + _group_vol_penalty(new_state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(new_state) - frozen_cost_offset
+            new_cost = sum(new_sheet_cache.values()) + _group_vol_penalty(new_state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(new_state) + self._route_fixed_penalty(new_state) - frozen_cost_offset
             delta    = new_cost - cur_cost
 
             # SA acceptance - compute probability explicitly for diagnostics
@@ -5087,7 +5611,7 @@ class ALNSSolver(QThread):
                                 split_changed = True
                                 new_sheet_cache[sname] = _sheet_cost(blocks, self.dm, st, self.cfg, dm_dur=self.dm_dur)
                 if split_changed:
-                    cur_cost        = sum(new_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(state) - frozen_cost_offset
+                    cur_cost        = sum(new_sheet_cache.values()) + _group_vol_penalty(state, orig_dest_vols, self.cfg) + self._group_overlap_penalty(state) + self._route_fixed_penalty(state) - frozen_cost_offset
                     cur_sheet_cache = new_sheet_cache
 
                 improved = cur_cost < best_cost
@@ -5178,6 +5702,69 @@ class ALNSSolver(QThread):
                     self.log.emit(f"  [{colour}] it={it+1:4d}  best={best_cost:.1f}"
                                   f"  T={T:.4f}  prob: {prob_str}")
 
+        # -- Split cleanup + route-elimination summary -------------------------
+        # A truck calling twice at the same farm for two partial loads is
+        # pointless, so fold any split parts that share a block back together.
+        # Then report the partial pickups AND, crucially, exactly which routes
+        # ended up cleared of farms entirely (the whole point of the feature).
+        if allow_split:
+            self._merge_same_block_splits(best_state)
+
+            # Which sheets started with farms but finished empty?  Compare the
+            # original entries (sheets) against the solved best_state.
+            initial_active = {
+                sname for sname, entry in sheets
+                if any(b.get("rows") for b in entry.get("blocks", []))
+            }
+            final_active = {
+                sname for sname, blks in best_state
+                if any(b.get("rows") for b in blks)
+            }
+            # A route holding a preload still has to make its delivery run, so
+            # it is never "eliminated" - at most it becomes delivery-only.
+            emptied  = sorted(sn for sn in (initial_active - final_active)
+                              if sn not in self._preload_sheets)
+            deliv_only = sorted(sn for sn in (initial_active - final_active)
+                                if sn in self._preload_sheets)
+
+            split_groups = {}
+            for _sn, blks in best_state:
+                for blk in blks:
+                    for fr in blk.get("rows", []):
+                        g = fr.get("_split_group")
+                        if g:
+                            split_groups.setdefault(g, 0)
+                            split_groups[g] += 1
+            n_split_farms = sum(1 for n in split_groups.values() if n >= 2)
+            n_split_stops = sum(n for n in split_groups.values() if n >= 2)
+
+            if emptied:
+                self.log.emit(
+                    f"  [{colour}] ROUTE(S) ELIMINATED: {len(emptied)} - "
+                    f"{', '.join(emptied)}  "
+                    f"({len(initial_active)} -> {len(final_active)} active routes)")
+            else:
+                self.log.emit(
+                    f"  [{colour}] No routes eliminated "
+                    f"({len(final_active)} active routes unchanged)")
+
+            if deliv_only:
+                self.log.emit(
+                    f"  [{colour}] NOT eliminated (preload delivery still "
+                    f"required): {', '.join(deliv_only)} - these trucks lost "
+                    f"their farms but must still run their preload to the "
+                    f"processor")
+
+            if n_split_farms:
+                self.log.emit(
+                    f"  [{colour}] Partial pickups: {n_split_farms} farm(s) "
+                    f"split across {n_split_stops} stops")
+            else:
+                self.log.emit(f"  [{colour}] Partial pickups: none in final solution")
+
+            # Stash for the caller (MainWindow) so it can surface a dialog/notice.
+            self.eliminated_routes.extend((colour, sn) for sn in emptied)
+
         def _state_vol(st):
             return sum(
                 (f.get("prior_vol") or 0)
@@ -5185,10 +5772,26 @@ class ALNSSolver(QThread):
                 for f in b["rows"]
                 if isinstance(f.get("prior_vol"), (int, float))
             )
-        input_farms = sum(len(b["rows"]) for _, blks in state for b in blks)
+        def _origin_farms(st):
+            """Count distinct origin farms: a split group counts once, however
+            many partial stops it was broken into."""
+            seen = set()
+            n = 0
+            for _, blks in st:
+                for b in blks:
+                    for f in b["rows"]:
+                        g = f.get("_split_group")
+                        if g:
+                            if g in seen:
+                                continue
+                            seen.add(g)
+                        n += 1
+            return n
+
+        input_farms = _origin_farms(state)
         input_vol   = _state_vol(state)
 
-        output_farms = sum(len(b["rows"]) for _, blocks in best_state for b in blocks)
+        output_farms = _origin_farms(best_state)
         output_vol   = _state_vol(best_state)
         farm_ok = "OK" if output_farms == input_farms else f"(!) LOST {input_farms - output_farms}"
         vol_ok  = "OK" if abs(output_vol - input_vol) < 1 else f"(!) LOST {input_vol - output_vol:,.0f}L"
@@ -5389,6 +5992,17 @@ class ALNSSolver(QThread):
         results.update(red_result)
         results.update(blue_result)
 
+        # -- Preload inventory (from original workbook) -----------------------
+        if self.cfg.get("allow_split", False):
+            if self._preload_sheets:
+                pl = ", ".join(f"{sn} ({v:,.0f}L)"
+                               for sn, v in sorted(self._preload_sheets.items()))
+                self.log.emit(
+                    f"\nPreload routes detected (cannot be eliminated - truck "
+                    f"must still deliver): {pl}")
+            else:
+                self.log.emit("\nPreload routes detected: none")
+
         # -- HiGHS post-optimality processor assignment check -----------------
         self.log.emit("\nRunning HiGHS processor-assignment verification...")
         for colour, sheets in [("RED", groups["RED"]), ("BLUE", groups["BLUE"])]:
@@ -5401,6 +6015,23 @@ class ALNSSolver(QThread):
             summary = _highs_verify_processor_assignment(
                 colour, sheets, solved_state, self.dm, self.cfg, self.log.emit)
             self.log.emit(summary)
+
+        # -- Route-elimination summary (split feature) ------------------------
+        if self.cfg.get("allow_split", False):
+            if self.eliminated_routes:
+                lines = "\n".join(f"    - [{c}] {sn}"
+                                  for c, sn in self.eliminated_routes)
+                self.log.emit(
+                    f"\n=== {len(self.eliminated_routes)} ROUTE(S) ELIMINATED "
+                    f"by split pickups ===\n{lines}\n"
+                    f"These trucks now carry no farms and can be taken off the "
+                    f"road.  Verify the split partial pickups on the remaining "
+                    f"routes before finalising.")
+            else:
+                self.log.emit(
+                    "\n=== Split pickups: no routes could be eliminated ===\n"
+                    "  Try raising the route-elimination value, or the remaining "
+                    "trucks may not have enough slack to absorb another route.")
 
         self.finished.emit(results)
 
@@ -7279,47 +7910,53 @@ class MainWindow(QMainWindow):
                      border-radius: 6px; }
             QLabel { border: none; background: transparent; }
         """)
-        tf = QVBoxLayout(timing_frame); tf.setContentsMargins(10,8,10,8); tf.setSpacing(5)
-        lbl_font  = QFont()
-        val_font  = QFont(); val_font.setBold(True)
+        tf = QVBoxLayout(timing_frame)
+        tf.setContentsMargins(10, 8, 10, 8)
+        tf.setSpacing(0)
+
+        lbl_font = QFont(); lbl_font.setPointSize(7)
+        val_font = QFont(); val_font.setBold(True); val_font.setPointSize(9)
+
         def add_timing_row(label, value, add_sep=True):
-            row_w = QWidget(); row_w.setStyleSheet("background:transparent;")
-            row_l = QHBoxLayout(row_w)
-            row_l.setContentsMargins(0,0,0,0); row_l.setSpacing(4)
-            lbl_w = QLabel(label); lbl_w.setFont(lbl_font)
-            lbl_w.setStyleSheet("color:#555555;")
-            lbl_w.setWordWrap(True)
-            val_w = QLabel(value);  val_w.setFont(val_font)
-            val_w.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
-            val_w.setStyleSheet("color:#222222;")
-            row_l.addWidget(lbl_w, stretch=1); row_l.addWidget(val_w)
-            tf.addWidget(row_w)
+            """Stacked two-liner: small grey label on top, bold value below.
+            Avoids horizontal squeeze in the narrow sidebar."""
+            lbl_w = QLabel(label)
+            lbl_w.setFont(lbl_font)
+            lbl_w.setStyleSheet("color: #888888;")
+            val_w = QLabel(value)
+            val_w.setFont(val_font)
+            val_w.setStyleSheet("color: #222222;")
+            tf.addSpacing(6)
+            tf.addWidget(lbl_w)
+            tf.addWidget(val_w)
+            tf.addSpacing(6)
             if add_sep:
                 sep = QFrame(); sep.setFrameShape(QFrame.HLine)
-                sep.setStyleSheet("color:#e0e0e0; background:#e0e0e0; max-height:1px;")
+                sep.setStyleSheet("color: #e0e0e0; background: #e0e0e0; max-height: 1px;")
                 tf.addWidget(sep)
+
         add_timing_row("Setup time",   f"{int(ONSITE_MIN)} min / stop")
         add_timing_row("Pump rate",    f"{int(PUMP_RATE_LPM)} L / min")
         add_timing_row("Volume limit", f"{VOL_LIMIT:,} L", add_sep=True)
 
-        # Regulatory milking buffer toggle
-        buf_row = QWidget(); buf_row.setStyleSheet("background:transparent;")
-        buf_hl  = QHBoxLayout(buf_row)
-        buf_hl.setContentsMargins(0, 0, 0, 0); buf_hl.setSpacing(4)
+        # Regulatory milking buffer toggle — checkbox on its own line so the
+        # full label fits, buffer description stacked below it.
+        tf.addSpacing(6)
         self._milking_buf_cb = QCheckBox("Reg. milking buffers")
-        self._milking_buf_cb.setFont(lbl_font)
-        self._milking_buf_cb.setStyleSheet("color:#555555; border:none;")
+        cb_font = QFont(); cb_font.setPointSize(8)
+        self._milking_buf_cb.setFont(cb_font)
+        self._milking_buf_cb.setStyleSheet("color: #555555; border: none;")
         self._milking_buf_cb.setChecked(True)
         self._milking_buf_cb.setToolTip(
             "2 h before window (wash cycle) + 1 h after (cooling)\n"
             "Uncheck to use raw milking windows only.")
-        self._milking_buf_val = QLabel("2h / 1h")
+        tf.addWidget(self._milking_buf_cb)
+        self._milking_buf_val = QLabel("2h wash / 1h cooling")
         self._milking_buf_val.setFont(val_font)
-        self._milking_buf_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self._milking_buf_val.setStyleSheet("color:#222222;")
-        buf_hl.addWidget(self._milking_buf_cb, stretch=1)
-        buf_hl.addWidget(self._milking_buf_val)
-        tf.addWidget(buf_row)
+        self._milking_buf_val.setStyleSheet("color: #222222;")
+        self._milking_buf_val.setWordWrap(True)
+        tf.addWidget(self._milking_buf_val)
+        tf.addSpacing(6)
         self._milking_buf_cb.toggled.connect(self._on_milking_buf_toggle)
         ll.addWidget(timing_frame)
 
@@ -7327,6 +7964,19 @@ class MainWindow(QMainWindow):
         ll.addStretch()
 
         # -- Bottom action buttons ----------------------------------------------
+        self._map_btn = QPushButton("🗺 View on Map")
+        self._map_btn.setFixedHeight(30)
+        self._map_btn.setStyleSheet(
+            "QPushButton{background:#2e7d32;color:white;font-weight:bold;"
+            "border-radius:4px;font-size:8pt;}"
+            "QPushButton:disabled{background:#a5d6a7;}")
+        self._map_btn.setToolTip(
+            "Open a map showing the current sheet's route.\n"
+            "Requires routes.db beside the exe.")
+        self._map_btn.clicked.connect(self._on_view_on_map)
+        ll.addWidget(self._map_btn)
+        ll.addSpacing(3)
+
         self.export_btn = QPushButton("Export to Excel...")
         self.export_btn.setFixedHeight(30)
         self.export_btn.setStyleSheet(
@@ -7383,75 +8033,6 @@ class MainWindow(QMainWindow):
     def _build_route_tab(self, bold):
         route_tab = QWidget()
         rt = QVBoxLayout(route_tab); rt.setContentsMargins(0,0,0,0); rt.setSpacing(4)
-
-        # -- IRMA Search bar --------------------------------------------------
-        # Sits above both tables so it searches Original and Modified together.
-        search_frame = QFrame()
-        search_frame.setFrameShape(QFrame.StyledPanel)
-        search_frame.setMaximumHeight(36)
-        sl = QHBoxLayout(search_frame)
-        sl.setContentsMargins(6, 3, 6, 3); sl.setSpacing(6)
-
-        sl.addWidget(QLabel("IRMA Search:"))
-        self._search_box = QLineEdit()
-        self._search_box.setPlaceholderText("e.g. 71-117  (Enter to search, Esc to clear)")
-        self._search_box.setFixedWidth(230)
-        sl.addWidget(self._search_box)
-
-        self._search_prev_btn = QPushButton("< Prev")
-        self._search_next_btn = QPushButton("Next >")
-        self._search_clear_btn = QPushButton("Clear")
-        for btn in (self._search_prev_btn, self._search_next_btn, self._search_clear_btn):
-            btn.setFixedHeight(24)
-            btn.setFixedWidth(64)
-            btn.setEnabled(False)
-        self._search_next_btn.setStyleSheet(
-            "QPushButton { background:#1565c0; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; } "
-            "QPushButton:disabled { background:#90caf9; }")
-        self._search_prev_btn.setStyleSheet(
-            "QPushButton { background:#1565c0; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; } "
-            "QPushButton:disabled { background:#90caf9; }")
-        self._search_clear_btn.setStyleSheet(
-            "QPushButton { background:#757575; color:white; font-weight:bold; "
-            "border-radius:3px; font-size:8pt; } "
-            "QPushButton:disabled { background:#bdbdbd; }")
-        sl.addWidget(self._search_prev_btn)
-        sl.addWidget(self._search_next_btn)
-        sl.addWidget(self._search_clear_btn)
-
-        self._search_status = QLabel("")
-        self._search_status.setMinimumWidth(120)
-        sl.addWidget(self._search_status)
-        sl.addStretch()
-
-        self._search_box.returnPressed.connect(self._on_search)
-        self._search_box.textChanged.connect(self._on_search_text_changed)
-        self._search_next_btn.clicked.connect(self._on_search_next)
-        self._search_prev_btn.clicked.connect(self._on_search_prev)
-        self._search_clear_btn.clicked.connect(self._on_search_clear)
-        rt.addWidget(search_frame)
-
-        # "View on Map" button — lives in the search bar row
-        self._map_btn = QPushButton("🗺 View on Map")
-        self._map_btn.setFixedHeight(28)
-        self._map_btn.setStyleSheet(
-            "QPushButton{background:#2e7d32;color:white;font-weight:bold;"
-            "border-radius:4px;font-size:8pt;padding:0 10px;}"
-            "QPushButton:disabled{background:#a5d6a7;}")
-        self._map_btn.setToolTip(
-            "Open a map showing the current sheet's route.\n"
-            "Requires routes.db beside the exe.")
-        self._map_btn.clicked.connect(self._on_view_on_map)
-        search_frame.setMaximumHeight(999)  # allow taller if needed
-        sl.addWidget(self._map_btn)
-
-        # Internal search state - populated by _on_search()
-        # List of (table, visual_row) for every match, in top-to-bottom order
-        # across both tables (orig then edit).
-        self._search_hits   = []   # [(table_widget, row_index), ...]
-        self._search_cursor = -1   # index into _search_hits for current highlight
 
         top_split = QSplitter(Qt.Horizontal)
 
@@ -7894,6 +8475,48 @@ class MainWindow(QMainWindow):
             "remain reliable.  Routes starting before noon = Day; noon+ = Night.")
         con_l.addWidget(self._sw_day_night_lock)
 
+        # -- Partial pickups (split farms across routes) -----------------------
+        self._sw_allow_split = QCheckBox("Allow split pickups (partial farm volumes)")
+        self._sw_allow_split.setToolTip(
+            "When enabled, the solver may divide a single farm's volume into two\n"
+            "partial pickups carried by two different trucks (both call at the\n"
+            "farm).  Combined with the route-elimination value below, this lets\n"
+            "the solver accept less efficient routes when doing so clears the\n"
+            "farms off another route entirely.  Off by default - leaving it off\n"
+            "reproduces the previous solver behaviour exactly.")
+        con_l.addWidget(self._sw_allow_split)
+
+        self._sw_route_fixed = QDoubleSpinBox()
+        self._sw_route_fixed.setRange(0.0, 99999.0)
+        self._sw_route_fixed.setSingleStep(25.0)
+        self._sw_route_fixed.setValue(150.0)
+        self._sw_route_fixed.setDecimals(0)
+        self._sw_route_fixed.setToolTip(
+            "Route-elimination value, in km-equivalent units.  Fixed cost the\n"
+            "solver charges for every route that still carries farms, so\n"
+            "emptying a route saves this much.  Set it to roughly the km of\n"
+            "extra driving you'd accept on the remaining routes in exchange for\n"
+            "running one truck fewer.  Only applies when split pickups are on.")
+        self._sw_route_fixed_row = spin_row("Route elimination value", self._sw_route_fixed, "km")
+        con_l.addWidget(self._sw_route_fixed_row)
+
+        self._sw_split_min_vol = QSpinBox()
+        self._sw_split_min_vol.setRange(500, 40000)
+        self._sw_split_min_vol.setSingleStep(500)
+        self._sw_split_min_vol.setValue(int(SPLIT_MIN_VOL))
+        self._sw_split_min_vol.setToolTip(
+            "Smallest volume either half of a split pickup may carry.  A farm is\n"
+            "only splittable when its volume is at least twice this.  Prevents\n"
+            "the solver from creating trivially small partial pickups.")
+        self._sw_split_min_vol_row = spin_row("Min split volume", self._sw_split_min_vol, "L")
+        con_l.addWidget(self._sw_split_min_vol_row)
+
+        def _sync_split_enabled(on):
+            self._sw_route_fixed_row.setEnabled(bool(on))
+            self._sw_split_min_vol_row.setEnabled(bool(on))
+        self._sw_allow_split.toggled.connect(_sync_split_enabled)
+        _sync_split_enabled(self._sw_allow_split.isChecked())
+
         con_l.addStretch()
         top_l.addWidget(con_box)
 
@@ -8228,7 +8851,7 @@ class MainWindow(QMainWindow):
         tools_vl.setContentsMargins(0, 0, 0, 0)
         tools_vl.setSpacing(4)
 
-        # ── Row 1: checkboxes + text reports ──────────────────────────────────
+        # ── Row 1: checkboxes only ─────────────────────────────────────────────
         row1 = QWidget()
         trl  = QHBoxLayout(row1); trl.setContentsMargins(0,0,0,0); trl.setSpacing(6)
 
@@ -8256,6 +8879,12 @@ class MainWindow(QMainWindow):
         trl.addWidget(self._chk_route_opt)
         self._chk_auto_flag = self._chk_route_opt
         self._chk_split_opt = self._chk_route_opt
+        trl.addStretch()
+        tools_vl.addWidget(row1)
+
+        # ── Row 2: all report + tool buttons on one line ───────────────────────
+        row2 = QWidget()
+        tr2  = QHBoxLayout(row2); tr2.setContentsMargins(0,0,0,0); tr2.setSpacing(6)
 
         for label, style, tip, slot in [
             ("Plant Window Cost Report", "#6a1b9a",
@@ -8282,23 +8911,6 @@ class MainWindow(QMainWindow):
              "Comprehensive printable listing: every route with each farm\n"
              "and processor stop listed per block.",
              self._on_route_listing_report),
-        ]:
-            btn = QPushButton(label)
-            btn.setFixedHeight(24)
-            btn.setStyleSheet(
-                f"QPushButton {{ background:{style}; color:white; font-weight:bold; "
-                f"border-radius:3px; font-size:8pt; padding: 0 8px; }}")
-            btn.setToolTip(tip)
-            btn.clicked.connect(slot)
-            trl.addWidget(btn)
-        trl.addStretch()
-        tools_vl.addWidget(row1)
-
-        # ── Row 2: visual / analysis tools ────────────────────────────────────
-        row2 = QWidget()
-        tr2  = QHBoxLayout(row2); tr2.setContentsMargins(0,0,0,0); tr2.setSpacing(6)
-
-        for label, style, tip, slot in [
             ("Processor Schedule", "#00695c",
              "Visual chart: every truck's arrival-to-departure time at every\n"
              "processor across the loaded file, on one shared time axis.\n"
@@ -9387,10 +9999,9 @@ class MainWindow(QMainWindow):
                     for b in blocks for r in b.get("rows", [])
                     if r.get("prior_vol") is not None)
 
-                vol_flag = "  ⚠" if vol > HARD_CAP else ("  !" if vol > VOL_LIMIT else "")
                 lines.append(
                     f"\n  {sname}  ·  {start_str}  ·  {len(blocks)} block(s)  "
-                    f"·  {n_farms} farms  ·  {vol:,.0f} L{vol_flag}")
+                    f"·  {n_farms} farms  ·  {vol:,.0f} L")
 
                 for b_idx, block in enumerate(blocks):
                     rows  = block.get("rows", [])
@@ -9414,11 +10025,10 @@ class MainWindow(QMainWindow):
                             fvol  = row.get("prior_vol")
                             try:    fvol_str = f"{float(fvol):,.0f} L"
                             except: fvol_str = ""
-                            m_flag = "  ★" if irma in MENNONITE_FARMS else ""
                             name_col = f"  {name}" if name else ""
                             lines.append(
                                 f"      {f_idx+1:>2}.  {irma:<10}{name_col:<35}"
-                                f"  {fvol_str:>10}{m_flag}")
+                                f"  {fvol_str:>10}")
                     else:
                         lines.append("      (no farms — preload block)")
 
@@ -9452,9 +10062,6 @@ class MainWindow(QMainWindow):
             f"  {len(red_sheets)} RED  ·  {len(blue_sheets)} BLUE  ·  "
             f"{len(all_sheets)} routes total  ·  "
             f"{total_farms} farms  ·  {total_vol:,.0f} L")
-        lines.append(
-            f"  ★ = Mennonite (no Sunday pickup)   "
-            f"! = over {VOL_LIMIT:,} L   ⚠ = over {HARD_CAP:,} L")
 
         self._debug_text.setPlainText("\n".join(lines))
         for i in range(self.tabs.count()):
@@ -11051,6 +11658,10 @@ class MainWindow(QMainWindow):
             "truck_avail_min_back": self._sw_truck_avail_min_back.value(),
             "truck_avail_penalty":  self._sw_truck_avail_pen.value(),
             "day_night_lock":       self._sw_day_night_lock.isChecked(),
+            "allow_split":          self._sw_allow_split.isChecked(),
+            "route_fixed_cost":     (self._sw_route_fixed.value()
+                                     if self._sw_allow_split.isChecked() else 0.0),
+            "split_min_vol":        float(self._sw_split_min_vol.value()),
         }
 
         # Refresh night-start label before solver runs
@@ -11158,7 +11769,29 @@ class MainWindow(QMainWindow):
 
         self._solver_log.append(
             f"\nOK Done - {n_updated} sheets updated in Modified panel.")
-        self._solver_status.setText(f"OK Complete - {n_updated} sheets updated")
+
+        # Prominent notice when the split feature cleared whole routes.
+        elim = getattr(self._solver_thread, "eliminated_routes", None)
+        if elim:
+            elim_str = ", ".join(f"{sn} ({c})" for c, sn in elim)
+            self._solver_log.append(
+                f"\n*** {len(elim)} ROUTE(S) ELIMINATED by split pickups: "
+                f"{elim_str} ***")
+            self._solver_status.setText(
+                f"OK Complete - {n_updated} sheets updated, "
+                f"{len(elim)} route(s) eliminated")
+            try:
+                QMessageBox.information(
+                    self, "Routes eliminated",
+                    f"The solver cleared {len(elim)} route(s) of all farms using "
+                    f"split pickups:\n\n  {elim_str}\n\n"
+                    f"These trucks now carry no farms. The farms were "
+                    f"redistributed (some as partial pickups) across the "
+                    f"remaining routes - review those before finalising.")
+            except Exception:
+                pass
+        else:
+            self._solver_status.setText(f"OK Complete - {n_updated} sheets updated")
         self._solver_progress.setValue(self._solver_progress.maximum())
 
         # Refresh currently displayed sheet if it was touched
@@ -11342,164 +11975,10 @@ class MainWindow(QMainWindow):
         self._block_sigs(False)
 
     # -------------------------------------------------------------------------
-    # IRMA Search
-    # -------------------------------------------------------------------------
-
-    # Highlight colours used for search results
-    _SEARCH_HIT_BG    = QColor("#fff176")   # yellow  - every match
-    _SEARCH_CURSOR_BG = QColor("#f57f17")   # amber   - the currently-navigated match
-
-    def _on_search_text_changed(self):
-        """Clear highlights as soon as the user edits the query so stale
-        results don't linger.  Don't re-search on every keypress - wait for
-        Enter so partial IRMA numbers (e.g. typing '71') don't scroll the
-        table around while the user is still typing."""
-        if not self._search_box.text().strip():
-            self._on_search_clear()
-
-    def _on_search(self):
-        """Run the search: find every farm row whose IRMA matches the query
-        (case-insensitive substring) in both the Original and Modified tables,
-        highlight them all, and scroll to the first hit."""
-        query = self._search_box.text().strip().upper()
-        self._search_clear_highlights()
-        self._search_hits   = []
-        self._search_cursor = -1
-
-        if not query:
-            self._search_status.setText("")
-            for btn in (self._search_prev_btn, self._search_next_btn,
-                        self._search_clear_btn):
-                btn.setEnabled(False)
-            return
-
-        irma_col = next((i for i, (_, k) in enumerate(COLS) if k == "irma"), 0)
-
-        for table in (self.orig_table, self.edit_table):
-            for row in range(table.rowCount()):
-                item = table.item(row, irma_col)
-                if item is None:
-                    continue
-                # Only match real farm rows (they carry UserRole farm data)
-                if item.data(Qt.UserRole) is None:
-                    continue
-                if query in item.text().upper():
-                    self._search_hits.append((table, row))
-                    # Apply hit highlight to every cell in this row
-                    for col in range(table.columnCount()):
-                        ci = table.item(row, col)
-                        if ci is not None:
-                            ci.setBackground(self._SEARCH_HIT_BG)
-
-        n = len(self._search_hits)
-        if n == 0:
-            self._search_status.setText("No match")
-            self._search_status.setStyleSheet("color: #c62828; font-weight: bold;")
-            for btn in (self._search_prev_btn, self._search_next_btn):
-                btn.setEnabled(False)
-            self._search_clear_btn.setEnabled(True)
-            return
-
-        self._search_status.setStyleSheet("")
-        for btn in (self._search_prev_btn, self._search_next_btn,
-                    self._search_clear_btn):
-            btn.setEnabled(True)
-
-        # Jump to first hit
-        self._search_cursor = 0
-        self._search_apply_cursor()
-
-    def _on_search_next(self):
-        if not self._search_hits:
-            return
-        self._search_cursor = (self._search_cursor + 1) % len(self._search_hits)
-        self._search_apply_cursor()
-
-    def _on_search_prev(self):
-        if not self._search_hits:
-            return
-        self._search_cursor = (self._search_cursor - 1) % len(self._search_hits)
-        self._search_apply_cursor()
-
-    def _search_apply_cursor(self):
-        """Update the status label, re-colour all hits (current one gets
-        a stronger amber), and scroll the relevant table to show it."""
-        irma_col = next((i for i, (_, k) in enumerate(COLS) if k == "irma"), 0)
-        n = len(self._search_hits)
-
-        for idx, (table, row) in enumerate(self._search_hits):
-            bg = self._SEARCH_CURSOR_BG if idx == self._search_cursor \
-                 else self._SEARCH_HIT_BG
-            for col in range(table.columnCount()):
-                ci = table.item(row, col)
-                if ci is not None:
-                    ci.setBackground(bg)
-
-        cur_table, cur_row = self._search_hits[self._search_cursor]
-        cur_table.scrollToItem(cur_table.item(cur_row, irma_col),
-                               QAbstractItemView.PositionAtCenter)
-        cur_table.setCurrentCell(cur_row, irma_col)
-
-        # Count hits per table for the label e.g. "3 / 5  (Orig: 2  Mod: 3)"
-        orig_hits = sum(1 for t, _ in self._search_hits if t is self.orig_table)
-        mod_hits  = sum(1 for t, _ in self._search_hits if t is self.edit_table)
-        label     = f"{self._search_cursor + 1} / {n}"
-        if orig_hits and mod_hits:
-            label += f"  (Orig: {orig_hits}  Mod: {mod_hits})"
-        elif orig_hits:
-            label += "  (Original only)"
-        elif mod_hits:
-            label += "  (Modified only)"
-        self._search_status.setText(label)
-
-    def _search_clear_highlights(self):
-        """Remove search highlight colours from all previously-highlighted rows.
-        Called before a new search and on clear so the table returns to its
-        normal row colours."""
-        irma_col = next((i for i, (_, k) in enumerate(COLS) if k == "irma"), 0)
-        for table, row in self._search_hits:
-            # Re-read the natural background from the IRMA cell's current data
-            # so we don't have to recompute the full row colour.  The IRMA cell
-            # background was set by populate_table and doesn't need to be exact;
-            # clearing to white is acceptable - the next _display_sheet call
-            # will restore proper colours anyway.  For a cleaner restore we
-            # delegate back to populate_table by triggering _display_sheet,
-            # but that's expensive.  Instead, restore to the standard alternating
-            # block colour based on whether the b_idx stored in UserRole is even/odd.
-            item = table.item(row, irma_col)
-            if item is None:
-                continue
-            farm_data = item.data(Qt.UserRole)
-            if isinstance(farm_data, tuple) and len(farm_data) >= 1:
-                b_idx = farm_data[0]
-                natural_bg = QColor("#e3f2fd") if b_idx % 2 == 0 else QColor("#ffffff")
-            else:
-                natural_bg = QColor("#ffffff")
-            for col in range(table.columnCount()):
-                ci = table.item(row, col)
-                if ci is not None:
-                    ci.setBackground(natural_bg)
-
-    def _on_search_clear(self):
-        """Clear the search box, remove highlights, and reset state."""
-        self._search_clear_highlights()
-        self._search_hits   = []
-        self._search_cursor = -1
-        self._search_box.clear()
-        self._search_status.setText("")
-        self._search_status.setStyleSheet("")
-        for btn in (self._search_prev_btn, self._search_next_btn,
-                    self._search_clear_btn):
-            btn.setEnabled(False)
-
     def _on_irma_lookup(self):
         """Open the IRMA Farm Lookup dialog against all currently loaded data."""
         dlg = IRMALookupDialog(self._cache, self._sheet_mods, parent=self)
         dlg.navigate_requested.connect(self._navigate_to_sheet)
-        # Pre-fill with the search box text if the user already has one there
-        if hasattr(self, "_search_box") and self._search_box.text().strip():
-            dlg._query.setText(self._search_box.text().strip())
-            dlg._run_search()
         dlg.exec_()
 
     def _navigate_to_sheet(self, fname, sname):
@@ -11856,16 +12335,18 @@ class MainWindow(QMainWindow):
         return day_routes, night_routes, night_start_mins
 
     def _on_milking_buf_toggle(self, checked):
-        """Enable or disable the regulatory milking-window buffers."""
+        """Enable or disable the regulatory milking-window buffers and
+        immediately redisplay the current sheet so timings reflect the change."""
         global MILKING_PRE_BUFFER_MINS, MILKING_POST_BUFFER_MINS
         MILKING_PRE_BUFFER_MINS  = 120.0 if checked else 0.0
         MILKING_POST_BUFFER_MINS = 60.0  if checked else 0.0
-        self._milking_buf_val.setText("2h / 1h" if checked else "off")
+        self._milking_buf_val.setText("2h wash / 1h cooling" if checked else "off")
         self._milking_buf_val.setStyleSheet(
-            "color:#222222;" if checked else "color:#aaaaaa;")
+            "color: #222222;" if checked else "color: #aaaaaa;")
         self.statusBar().showMessage(
             "Regulatory milking buffers " + ("enabled" if checked else "disabled"),
             3000)
+        self._display_sheet()
 
     def _on_truck_avail_visualize(self):
         """Open (or refresh) the TruckAvailDialog showing full route timelines."""
@@ -11927,16 +12408,6 @@ class MainWindow(QMainWindow):
         if not fname or not sname or fname not in self._cache: return
         entry = self._cache[fname].get(sname)
         if not entry: return
-        # Changing sheet invalidates any previous search results - clear them
-        # silently (no UI flash) before the tables are repopulated.
-        if hasattr(self, "_search_hits") and self._search_hits:
-            self._search_hits   = []
-            self._search_cursor = -1
-            self._search_status.setText("")
-            self._search_status.setStyleSheet("")
-            for btn in (self._search_prev_btn, self._search_next_btn,
-                        self._search_clear_btn):
-                btn.setEnabled(False)
         blocks     = entry["blocks"]
         self._driver_start = entry["start_time"]
         self._day_colour   = entry.get("day_colour", "")
