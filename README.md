@@ -1,7 +1,9 @@
 
-current ver: viewer217
+current ver: viewer218
 
 ver history
+
+218: cleaned up ui
 
 217: file structure overhaul
 
