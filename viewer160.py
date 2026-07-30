@@ -8625,6 +8625,16 @@ class MainWindow(QMainWindow):
         self._solve_btn.clicked.connect(self._on_solve_clicked)
         run_l.addWidget(self._solve_btn)
 
+        self._reset_solver_btn = QPushButton("Reset to Defaults")
+        self._reset_solver_btn.setFixedHeight(24)
+        self._reset_solver_btn.setStyleSheet(
+            "QPushButton { background:#78909c; color:white; font-weight:bold; "
+            "border-radius:4px; font-size:8pt; } "
+            "QPushButton:hover { background:#546e7a; }")
+        self._reset_solver_btn.setToolTip("Reset all solver settings to their default values.")
+        self._reset_solver_btn.clicked.connect(self._on_reset_solver_defaults)
+        run_l.addWidget(self._reset_solver_btn)
+
         self._intra_btn = QPushButton("Optimise Within Routes")
         self._intra_btn.setFixedHeight(28)
         self._intra_btn.setStyleSheet(
@@ -11610,6 +11620,40 @@ class MainWindow(QMainWindow):
             self._refresh_comparison()
 
     # -- Solver event handlers -------------------------------------------------
+
+    def _on_reset_solver_defaults(self):
+        """Reset every solver control to its original default value."""
+        # Objective weights
+        self._sw_milking.setValue(0.3)
+        self._sw_plant_win_pen.setValue(20.0)
+        self._sw_plant_margin_mins.setValue(30.0)
+        self._sw_plant_margin_rate.setValue(25.0)
+        self._sw_avoid_win_pen.setValue(0.0)
+        self._sw_overlap_pen.setValue(0.0)
+        # Capacity / volume
+        self._sw_vol_tol.setValue(0.15)
+        self._sw_vol_pen.setValue(5.0)
+        self._sw_hard_cap.setValue(HARD_CAP)
+        self._sw_cap_pen.setValue(2.0)
+        # Shift
+        self._sw_max_shift.setValue(12.0)
+        self._sw_shift_pen.setValue(50.0)
+        self._sw_min_shift.setValue(8.0)
+        self._sw_shift_under_pen.setValue(30.0)
+        self._sw_shift_hours.setValue(1.0)
+        # Constraints
+        self._sw_day_night_lock.setChecked(False)
+        self._sw_allow_split.setChecked(False)
+        self._sw_route_fixed.setValue(150.0)
+        self._sw_split_min_vol.setValue(int(SPLIT_MIN_VOL))
+        self._sw_truck_avail_chk.setChecked(False)
+        self._sw_truck_avail_min_back.setValue(8)
+        self._sw_truck_avail_pen.setValue(3000.0)
+        # Run parameters
+        self._sw_iters.setValue(200)
+        self._sw_cool.setValue(0.01)
+        self._sw_seed.setValue(0)
+        self.statusBar().showMessage("Solver settings reset to defaults.", 3000)
 
     def _on_solve_clicked(self):
         fname = self.file_cb.currentText()
