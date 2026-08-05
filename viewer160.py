@@ -1820,7 +1820,7 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         "prior_vol": 58,
         "dist":      58,
         "arr_time":  46,
-        "wait_time": 38,
+        "wait_time": 54,   # wide enough for "12h00m"
         "dep_time":  56,   # "Dep."
         "_mwo":      20,   # "M"   - checkbox
     }
