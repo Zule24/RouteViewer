@@ -16,9 +16,9 @@ from PyQt5.QtWidgets import (
     QGroupBox, QCheckBox, QTextEdit, QDialog,
     QLineEdit, QMessageBox, QFileDialog, QToolTip, QButtonGroup,
     QGraphicsScene, QGraphicsView, QGraphicsEllipseItem,
-    QGraphicsRectItem, QGraphicsTextItem, QDialogButtonBox
+    QGraphicsRectItem, QGraphicsTextItem, QDialogButtonBox, QTimeEdit
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray, QObject, QRectF
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QMimeData, QByteArray, QObject, QRectF, QTime
 from PyQt5.QtGui import (QFont, QColor, QDrag, QPainter, QPen, QBrush,
                          QTransform, QPixmap, QPainterPath, QTextDocument)
 from PyQt5.QtPrintSupport import QPrinter
@@ -58,7 +58,6 @@ ONSITE_MIN      = 15.0   # fixed on-site setup minutes per stop
 PUMP_RATE_LPM   = 750.0  # litres per minute
 
 VEDDER_DEPART_EXTRA_MINS = 40   # extra minutes added to shift start (Vedder departure)
-PRELOAD_WASH_MINS        = 75   # wash time added after a preload offload (1h 15m)
 INTER_PROCESSOR_BREAK    = 10   # break minutes inserted between processor stops
 
 # Farms whose milking windows can be suppressed (e.g. robots / continuous milking)
@@ -961,6 +960,15 @@ def calc_times(blocks, dm, start_time, dm_dur=None, suppress_no_milking=True,
         stops   = _build_block_stops(block, origin, is_last)
         block_times = []
 
+        # Per-route start override.  Route 1 (block 0) defaults to the sheet
+        # start_time; routes 2+ default to continuing from the previous route's
+        # end (cursor).  An explicit block["start_override"] time pins this
+        # route's departure - used to model a later start (e.g. a processor
+        # delay on the previous run).  No override => unchanged behaviour.
+        _ovr = block.get("start_override")
+        if _ovr is not None:
+            cursor = datetime.combine(date.today(), _ovr)
+
         def _leg_mins(s_idx):
             if durs is not None and s_idx < len(durs) and durs[s_idx] is not None:
                 return durs[s_idx]
@@ -1002,7 +1010,6 @@ def calc_times(blocks, dm, start_time, dm_dur=None, suppress_no_milking=True,
                             dep_dt += timedelta(minutes=INTER_PROCESSOR_BREAK)
                     block_times.append({"arr": arr_dt.time(), "dep": dep_dt.time(), "wait": None})
                     cursor = dep_dt
-            cursor += timedelta(minutes=PRELOAD_WASH_MINS)
             all_times.append(block_times)
             continue
 
@@ -1451,7 +1458,7 @@ def make_data_item(text, bg=CLR_WHITE, align=Qt.AlignCenter, fg=None, draggable=
 # -- Route table renderer ------------------------------------------------------
 
 def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=None,
-                   suppress_no_milking=True, plant_windows=None):
+                   suppress_no_milking=True, plant_windows=None, start_edit_cb=None):
     table.clearSpans()
     table.clear()
     table.setColumnCount(len(COLS))
@@ -1493,13 +1500,73 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         route_vol = sum((row["prior_vol"] or 0) for row in farms
                         if isinstance(row.get("prior_vol"), (int, float)))
 
-        # Banner
-        table.setSpan(r, 0, 1, len(COLS))
+        # Banner.  Both panels show each leg's start time on the right of the
+        # banner (Leg 1 = yard start, Leg 2 = processor departure).  On the
+        # editable (Modified) panel it's an editable field so the time can be
+        # nudged; on the read-only (Original) panel it's a plain label showing
+        # the default.  The left portion stays a draggable banner item so block
+        # reordering still works.
+        btimes = all_times[b_idx] if all_times else None
+        show_start = (start_time is not None) or (block.get("start_override") is not None)
+        make_editor = editable and (start_edit_cb is not None)
+        span_cols = (len(COLS) - 4) if show_start else len(COLS)
+        table.setSpan(r, 0, 1, span_cols)
         banner_item = make_header_item(f"  Route: {block['route']}",
                                        bg=CLR_ROUTE_HDR, fg=CLR_ROUTE_FG,
                                        draggable=editable)
         banner_item.setData(Qt.UserRole + 2, b_idx)
         table.setItem(r, 0, banner_item)
+
+        if show_start:
+            # Effective start for this leg: override if pinned, else the
+            # computed origin departure (Leg 1 shows yard start before the
+            # 40-min pre-trip).
+            ovr = block.get("start_override")
+            if b_idx == 0:
+                eff_t = ovr or start_time
+            else:
+                eff_t = ovr or (btimes[0]["dep"] if btimes and btimes[0] else None)
+
+            cont = QWidget()
+            cont.setStyleSheet(f"background:{CLR_ROUTE_HDR.name()};")
+            chl = QHBoxLayout(cont)
+            chl.setContentsMargins(4, 0, 6, 0); chl.setSpacing(4)
+            chl.addStretch()
+            lab = QLabel("Leg 1 start" if b_idx == 0 else "Leg 2 start")
+            lab.setStyleSheet(f"color:{CLR_ROUTE_FG.name()};background:transparent;"
+                              "font-weight:bold;font-size:8pt;")
+            chl.addWidget(lab)
+
+            if make_editor:
+                te = QTimeEdit()
+                te.setDisplayFormat("HH:mm")
+                te.setFixedWidth(70)
+                te.setStyleSheet("background:white;color:#222;font-size:8pt;")
+                if eff_t is not None:
+                    te.setTime(QTime(eff_t.hour, eff_t.minute))
+                te.setToolTip(
+                    "Leg 1: yard departure time (a 40-min pre-trip inspection\n"
+                    "applies before the truck actually leaves).\n"
+                    "Leg 2+: defaults to when the previous leg leaves its\n"
+                    "processor; adjust later to model a processor delay."
+                    if b_idx == 0 else
+                    "Defaults to when the previous leg leaves its processor.\n"
+                    "Adjust later to model a processor delay.")
+                # Commit on finish (Enter / focus-out) so downstream times re-flow.
+                te.editingFinished.connect(
+                    lambda _b=b_idx, _te=te: start_edit_cb(_b, _te.time()))
+                chl.addWidget(te)
+            else:
+                # Read-only display on the Original panel.
+                val = QLabel(fmt_hhmm(eff_t) if eff_t is not None else "-")
+                val.setAlignment(Qt.AlignCenter)
+                val.setFixedWidth(70)
+                val.setStyleSheet(f"color:{CLR_ROUTE_FG.name()};background:transparent;"
+                                  "font-weight:bold;font-size:8pt;")
+                chl.addWidget(val)
+
+            table.setSpan(r, len(COLS) - 4, 1, 4)
+            table.setCellWidget(r, len(COLS) - 4, cont)
         r += 1
 
         # Column sub-headers
@@ -1520,11 +1587,17 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         # Time entries for this block: [origin, farm0, farm1, ..., dest]
         btimes = all_times[b_idx] if all_times else None
         origin_dep_str = fmt_hhmm(btimes[0]["dep"]) if btimes else "-"
+        # The first route of the day includes a 40-min pre-trip inspection at
+        # the yard before the truck can depart - surface it in the Wait column
+        # (display only; already reflected in the departure time above).
+        pretrip_str = f"{int(VEDDER_DEPART_EXTRA_MINS)}m" if b_idx == 0 else ""
         for c_idx, (_, key) in enumerate(COLS):
             if key == "irma":       item = make_data_item(origin_key, bg=CLR_DEPOT)
             elif key == "location": item = make_data_item(origin_sub, bg=CLR_DEPOT)
             elif key == "dist":     item = make_data_item(od_str, bg=CLR_DEPOT,
                                                           align=Qt.AlignRight|Qt.AlignVCenter)
+            elif key == "wait_time": item = make_data_item(
+                pretrip_str, bg=CLR_DEPOT, align=Qt.AlignCenter)
             elif key == "dep_time": item = make_data_item(origin_dep_str, bg=CLR_DEPOT,
                                                           align=Qt.AlignCenter)
             else:                   item = make_data_item("", bg=CLR_DEPOT)
@@ -1790,18 +1863,22 @@ def populate_table(table, blocks, dm, editable=False, start_time=None, dm_dur=No
         table.setItem(r, c_idx, item)
     r += 1
 
-    # Shift length row
+    # Shift length row.  The shift begins at Leg 1's effective start - i.e. the
+    # override if the user pinned one, otherwise the sheet start_time.  Using
+    # the raw start_time here would ignore an edited Leg 1 start and give the
+    # wrong length (the end cursor already reflects overrides).
+    eff_start = (blocks[0].get("start_override") or start_time) if blocks else start_time
     shift_len_str = "-"
-    if start_time and _end_cursor is not None:
+    if eff_start and _end_cursor is not None:
         from datetime import datetime, date
-        base  = datetime.combine(date.today(), start_time)
+        base  = datetime.combine(date.today(), eff_start)
         delta = _end_cursor - base
         total_mins = int(delta.total_seconds() / 60)
         hours, mins = divmod(total_mins, 60)
         shift_len_str = f"{hours}h {mins:02d}m"
     CLR_SHIFT = QColor("#e8eaf6")
     table.setSpan(r, 0, 1, len(COLS))
-    lbl = f"  Estimated Shift Length:  {fmt_hhmm(start_time)} -> {shift_end}  =  {shift_len_str}"
+    lbl = f"  Estimated Shift Length:  {fmt_hhmm(eff_start)} -> {shift_end}  =  {shift_len_str}"
     item = make_header_item(lbl, bg=CLR_SHIFT, fg=QColor("#1a237e"))
     table.setItem(r, 0, item)
 
@@ -2682,7 +2759,11 @@ def _sheet_cost(blocks, dm, start_time, cfg, dm_dur=None):
         all_times  = _ct2[0] if _ct2 is not None else None
         _end_cur2  = _ct2[1] if _ct2 is not None else None
         if _end_cur2 is not None:
-            base = datetime.combine(date.today(), start_time)
+            # Shift begins at Leg 1's effective start (override-aware) - the
+            # end cursor already reflects any start overrides, so the base must
+            # too or the shift length (and its penalty) is wrong.
+            _eff_start = (blocks[0].get("start_override") or start_time) if blocks else start_time
+            base = datetime.combine(date.today(), _eff_start)
             shift_hours = (_end_cur2 - base).total_seconds() / 3600.0
         if all_times:
 
@@ -10337,7 +10418,6 @@ class MainWindow(QMainWindow):
         lines.append(f"Suppress no-milking farms: {suppress}")
         lines.append(f"THREE_WINDOW_FARMS loaded : {len(THREE_WINDOW_FARMS)} entries")
         lines.append(f"Vedder depart extra       : +{VEDDER_DEPART_EXTRA_MINS} min")
-        lines.append(f"Preload wash              : +{PRELOAD_WASH_MINS} min")
         lines.append(f"Inter-processor break     : +{INTER_PROCESSOR_BREAK} min")
         lines.append("")
 
@@ -10435,10 +10515,6 @@ class MainWindow(QMainWindow):
                 vt = btimes[v_idx] if (btimes and v_idx < len(btimes)) else None
                 lines.append(
                     f"  Return : VEDDER                      arr={fmt_hhmm(vt['arr'] if vt else None)}")
-
-            # Preload wash note
-            if is_preload:
-                lines.append(f"  [wash {PRELOAD_WASH_MINS}m applied after preload offload]")
 
             lines.append("")
 
@@ -10792,6 +10868,25 @@ class MainWindow(QMainWindow):
             key = (fname, sname)
             if key not in self._sheet_mods: continue
             mod_blocks = self._sheet_mods[key]
+
+            # -- Persist Route 1 (block 0) yard-start override ------------------
+            # If the user pinned Route 1's start in the banner editor, write it
+            # back to the driver-start cell (AZ1) so it survives the export.
+            # The cell may be part of a merge; write to the merge anchor.
+            r1_ovr = mod_blocks[0].get("start_override") if mod_blocks else None
+            if r1_ovr is not None:
+                anchor_r, anchor_c = 1, C_DRIVER_START
+                for _mr in ws.merged_cells.ranges:
+                    if (_mr.min_row <= 1 <= _mr.max_row and
+                            _mr.min_col <= C_DRIVER_START <= _mr.max_col):
+                        anchor_r, anchor_c = _mr.min_row, _mr.min_col
+                        break
+                try:
+                    ws.cell(anchor_r, anchor_c).value = r1_ovr
+                except Exception as _ex:
+                    if getattr(self, "_debug_text", None) is not None:
+                        self._debug_text.append(
+                            f"[{fname}/{sname}] could not write Route 1 start: {_ex}")
 
             # -- Map farm row numbers to blocks ---------------------------------
             # Each IRMA# header in the sheet starts a new block (leg) that HAS
@@ -12540,6 +12635,35 @@ class MainWindow(QMainWindow):
         if fname and sname and self._mod_blocks is not None:
             self._sheet_mods[(fname, sname)] = self._mod_blocks
 
+    def _on_route_start_changed(self, b_idx, qtime):
+        """A route's start-time editor in the banner was committed.
+
+        Route 1 (block 0) pins the yard departure (the 40-min pre-trip still
+        applies on top).  Routes 2+ pin the departure from the previous
+        processor - normally auto (when route 1 leaves), but pinnable to model
+        a processor delay.  Stored as block['start_override'] on the modified
+        blocks so it flows through timing (and the solver) for this sheet.
+        """
+        if not self._mod_blocks or b_idx >= len(self._mod_blocks):
+            return
+        new_t = dt_time(qtime.hour(), qtime.minute())
+        block = self._mod_blocks[b_idx]
+
+        # For route 1, dropping the override back onto the sheet's original
+        # start clears it (keeps the model clean); otherwise pin it.
+        if b_idx == 0 and self._driver_start is not None and \
+           new_t.hour == self._driver_start.hour and \
+           new_t.minute == self._driver_start.minute:
+            block.pop("start_override", None)
+        else:
+            if block.get("start_override") == new_t:
+                return   # no change - avoid needless re-render
+            block["start_override"] = new_t
+
+        self._render_editable()
+        if self.tabs.currentIndex() == 1:
+            self._refresh_comparison()
+
     def _render_editable(self):
         self._save_mod_blocks()
         self.edit_table.blockSignals(True)
@@ -12549,7 +12673,8 @@ class MainWindow(QMainWindow):
                        start_time=getattr(self, "_driver_start", None),
                        dm_dur=self.dm_dur,
                        suppress_no_milking=_sup,
-                       plant_windows=self._get_plant_windows() if hasattr(self, "_get_plant_windows") else {})
+                       plant_windows=self._get_plant_windows() if hasattr(self, "_get_plant_windows") else {},
+                       start_edit_cb=self._on_route_start_changed)
         self.edit_table.blockSignals(False)
         # Show status warning if any block has no processor
         no_proc = [b for b in (self._mod_blocks or [])
